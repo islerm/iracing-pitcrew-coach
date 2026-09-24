@@ -1,0 +1,29 @@
+# Rust build output
+/target/
+
+# Raw iRacing telemetry. Real .ibt files carry your name, iRacing ID, club, setups and
+# the other drivers in the session. Only anonymized fixtures made with --make-fixture
+# are committed (see README "Test data").
+*.ibt
+!tests/fixtures/*.ibt
+*.olap
+*.blap
+*.rpy
+
+# Track maps and turn names generated on this machine (rebuilt on first import)
+/data/tracks/
+
+# Local tool/editor settings
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env files, just in case
+.env
+.env.*

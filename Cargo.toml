@@ -1,0 +1,19 @@
+[package]
+name = "iracing_pitcrew_coach"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.7"
+clap = { version = "4.0", features = ["derive"] }
+csv = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+# Live telemetry reads iRacing's shared memory, which only exists on Windows.
+# Everything else (UI, .ibt import, replay, tests) builds on macOS/Linux too.
+[target.'cfg(windows)'.dependencies]
+iracing = { git = "https://github.com/LeoAdamek/iracing.rs", features = ["telemetry"] }
