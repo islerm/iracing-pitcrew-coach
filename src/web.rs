@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
-    analysis::summarize_session,
+    analysis::{add_corner_notes, summarize_session},
+    handling::{corner_notes, peak_combined_g},
     coach::generate_feedback,
     ibt::read_ibt,
     io::{default_telemetry_dir, parse_csv_laps},
@@ -252,6 +253,8 @@ struct SplitDetailResponse {
     lap_count: usize,
     has_track: bool,
     traced_laps: Vec<i32>,
+    /// Session peak combined g (98th percentile over all traces), the 100% mark for grip use.
+    peak_g: Option<f64>,
     summary: SessionSummary,
     suggestions: Vec<String>,
     feedback: String,
@@ -326,6 +329,7 @@ fn split_detail(split: &PracticeSplit) -> SplitDetailResponse {
         lap_count: split.laps.len(),
         has_track: split.track.is_some(),
         traced_laps: split.traces.iter().map(|trace| trace.lap_number).collect(),
+        peak_g: peak_combined_g(&split.traces),
         summary: split.summary.clone(),
         suggestions: split.summary.suggestions.clone(),
         feedback: split.feedback.clone(),
@@ -407,7 +411,10 @@ async fn finalize_split(state: &Arc<AppState>, run: NewRun, model: String) -> Ap
     }
 
     let (run, summary, feedback, model) = tokio::task::spawn_blocking(move || {
-        let summary = summarize_session(&run.laps);
+        let mut summary = summarize_session(&run.laps);
+        if let Some(track) = &run.track {
+            add_corner_notes(&mut summary, corner_notes(&run.traces, &track.turns, track.length_m));
+        }
         let feedback = generate_feedback(&summary, &model);
         (run, summary, feedback, model)
     })

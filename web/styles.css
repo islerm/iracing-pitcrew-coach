@@ -408,6 +408,26 @@ table.corners tbody tr.active { background: var(--accent-soft); box-shadow: inse
 .traces .even-fill { fill: var(--text-2); }
 .traces .cursor-line { stroke: var(--text); stroke-width: 1; opacity: 0.6; pointer-events: none; }
 .traces .drag-rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.traces .abs-marks { fill: var(--bad); opacity: 0.85; }
+table.corners .bal-ref { color: var(--text-3); font-size: 11px; }
+.telemetry-grid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 20px; align-items: start; }
+.grip-circle { position: sticky; top: 16px; }
+.grip-circle svg { width: 100%; height: auto; display: block; margin-top: 6px; background: var(--bg); border-radius: var(--radius-sm); }
+.gg-axis { stroke: var(--border-strong); stroke-width: 1; }
+.gg-ring { fill: none; stroke: var(--border); stroke-width: 1; }
+.gg-peak { fill: none; stroke: var(--text-3); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.gg-tick { fill: var(--text-3); font-size: 9px; font-family: var(--mono); }
+.gg-edge { fill: var(--text-3); font-size: 9px; font-family: var(--sans); text-anchor: middle; text-transform: uppercase; letter-spacing: 0.5px; }
+.gg-dots { fill: none; stroke-width: 3; stroke-linecap: round; }
+.gg-dots.sel { stroke: var(--accent); opacity: 0.55; }
+.gg-dots.ref { stroke: var(--compare); opacity: 0.35; }
+.gg-cursor { stroke: var(--surface); stroke-width: 2; }
+.gg-cursor.sel { fill: var(--accent); }
+.gg-cursor.ref { fill: var(--compare); }
+.gg-readout { font-size: 11.5px; margin-top: 6px; min-height: 32px; line-height: 1.45; }
+.gg-readout .sel-fill { color: var(--accent); font-weight: 600; }
+.gg-readout .ref-fill { color: var(--compare); font-weight: 600; }
+.gg-note { font-size: 11.5px; margin-top: 6px; line-height: 1.4; }
 .trace-foot { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-2); margin-top: 4px; font-family: var(--mono); }
 .trace-foot .faint { font-family: var(--sans); }
 
@@ -417,6 +437,8 @@ table.corners tbody tr.active { background: var(--accent-soft); box-shadow: inse
 }
 @media (max-width: 1080px) {
   .split-2, .coach, .track-grid { grid-template-columns: 1fr; }
+  .telemetry-grid { grid-template-columns: 1fr; }
+  .grip-circle { position: static; max-width: 320px; }
   .detail { position: static; }
 }
 @media (max-width: 820px) {

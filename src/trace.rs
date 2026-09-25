@@ -25,6 +25,14 @@ pub struct Frame {
     pub tyre_avg: f32,
     pub tyre_min: f32,
     pub tyre_max: f32,
+    /// Lateral / longitudinal acceleration in m/s² (iRacing's `LatAccel`/`LongAccel`, which
+    /// include gravity, so banking and slopes show up too).
+    pub lat_accel: f32,
+    pub long_accel: f32,
+    /// `YawRate` in rad/s. NaN when the channel is missing; traces then derive it from heading.
+    pub yaw_rate: f32,
+    /// `BrakeABSactive` as 1.0/0.0. NaN for cars or files without it.
+    pub abs_active: f32,
 }
 
 impl Default for Frame {
@@ -46,6 +54,10 @@ impl Default for Frame {
             tyre_avg: f32::NAN,
             tyre_min: f32::NAN,
             tyre_max: f32::NAN,
+            lat_accel: f32::NAN,
+            long_accel: f32::NAN,
+            yaw_rate: f32::NAN,
+            abs_active: f32::NAN,
         }
     }
 }
@@ -73,6 +85,21 @@ pub struct LapTrace {
     pub brake: Vec<f32>,
     pub gear: Vec<i8>,
     pub steer_deg: Vec<f32>,
+    /// Lateral and longitudinal acceleration in g. Empty when the source has no accelerometer data.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lat_g: Vec<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub long_g: Vec<f32>,
+    /// Yaw rate in deg/s, from `YawRate` or, when that's missing, differentiated heading.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub yaw_rate_dps: Vec<f32>,
+    /// 1 where ABS was active. Empty when the car or file has no ABS channel.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub abs: Vec<u8>,
+    /// Handling balance in steering-wheel degrees: how much more lock the driver used than the
+    /// car's rotation needed. Positive = understeer, negative = oversteer. See `handling`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub balance_deg: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -98,6 +125,9 @@ pub fn grid_size(length_m: f64) -> usize {
         1000
     }
 }
+
+/// Standard gravity, for converting m/s² to g.
+const G: f32 = 9.80665;
 
 fn round2(value: f32) -> f32 {
     (value * 100.0).round() / 100.0
@@ -173,12 +203,18 @@ fn resample(points: &[GridPoint], lap_number: i32, n: usize) -> Resampled {
             brake: Vec::with_capacity(n + 1),
             gear: Vec::with_capacity(n + 1),
             steer_deg: Vec::with_capacity(n + 1),
+            lat_g: Vec::with_capacity(n + 1),
+            long_g: Vec::with_capacity(n + 1),
+            yaw_rate_dps: Vec::with_capacity(n + 1),
+            abs: Vec::with_capacity(n + 1),
+            balance_deg: Vec::new(),
         },
         yaw: Vec::with_capacity(n + 1),
         lat: Vec::with_capacity(n + 1),
         lon: Vec::with_capacity(n + 1),
     };
 
+    let mut abs_seen = false;
     let mut k = 0;
     for j in 0..=n {
         let p = j as f64 / n as f64;
@@ -197,11 +233,45 @@ fn resample(points: &[GridPoint], lap_number: i32, n: usize) -> Resampled {
         trace.brake.push(round2(interpolate(fa.brake, fb.brake, t) * 100.0));
         trace.gear.push(if t < 0.5 { fa.gear } else { fb.gear } as i8);
         trace.steer_deg.push(round2(interpolate(fa.steer_rad, fb.steer_rad, t).to_degrees()));
+        trace.lat_g.push(round2(interpolate(fa.lat_accel, fb.lat_accel, t) / G));
+        trace.long_g.push(round2(interpolate(fa.long_accel, fb.long_accel, t) / G));
+        trace.yaw_rate_dps.push(round2(interpolate(fa.yaw_rate, fb.yaw_rate, t).to_degrees()));
+        trace.abs.push(if t < 0.5 { fa.abs_active } else { fb.abs_active } as u8);
+        abs_seen |= fa.abs_active.is_finite();
         out.yaw.push(a.yaw_unwrapped + (b.yaw_unwrapped - a.yaw_unwrapped) * t);
         out.lat.push(fa.lat + (fb.lat - fa.lat) * t);
         out.lon.push(fa.lon + (fb.lon - fa.lon) * t);
     }
+
+    let trace = &mut out.trace;
+    if !abs_seen {
+        trace.abs.clear();
+    }
+    if trace.lat_g.iter().chain(&trace.long_g).any(|v| !v.is_finite()) {
+        trace.lat_g.clear();
+        trace.long_g.clear();
+    }
+    if trace.yaw_rate_dps.iter().any(|v| !v.is_finite()) {
+        trace.yaw_rate_dps = yaw_rate_from_heading(&out.yaw, &trace.time_s);
+    }
     out
+}
+
+/// Yaw rate (deg/s) by differentiating unwrapped heading over time, for files without
+/// `YawRate`. Central differences over ~5 grid points keep quantization noise down.
+fn yaw_rate_from_heading(yaw: &[f64], time_s: &[f32]) -> Vec<f32> {
+    if yaw.iter().any(|v| !v.is_finite()) {
+        return Vec::new();
+    }
+    let n = yaw.len() - 1;
+    let half = 2;
+    (0..=n)
+        .map(|j| {
+            let (a, b) = (j.saturating_sub(half), (j + half).min(n));
+            let dt = (time_s[b] - time_s[a]) as f64;
+            if dt > 0.0 { round2(((yaw[b] - yaw[a]) / dt).to_degrees() as f32) } else { 0.0 }
+        })
+        .collect()
 }
 
 /// Time since the lap start at a given lap fraction, from the lap's increasing points.
@@ -391,9 +461,12 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
         None => (None, false),
     };
 
+    let mut traces: Vec<LapTrace> = resampled.into_iter().map(|r| r.trace).collect();
+    crate::handling::add_balance(&mut traces);
+
     RunData {
         laps,
-        traces: resampled.into_iter().map(|r| r.trace).collect(),
+        traces,
         map_points,
         map_from_gps,
     }

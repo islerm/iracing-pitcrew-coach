@@ -75,6 +75,11 @@
 
   const deltaClass = (d) => (!isNum(d) || Math.abs(d) < 0.0005 ? "even" : d < 0 ? "good" : "bad");
   const fmtNum = (v, digits = 1, unit = "") => (isNum(v) ? v.toFixed(digits) + unit : "—");
+  const fmtSigned = (v, digits = 1) => {
+    if (!isNum(v)) return "—";
+    const r = v.toFixed(digits);
+    return Number(r) === 0 ? "±" + Math.abs(Number(r)).toFixed(digits) : (v > 0 ? "+" : "−") + Math.abs(v).toFixed(digits);
+  };
 
   function fmtClock(ms) {
     const total = Math.max(0, Math.floor(ms / 1000));
@@ -537,7 +542,37 @@
     return null;
   }
 
-  function cornerStats(segments, sel, ref, lengthM) {
+  /**
+   * Handling in one corner, matching the coach's numbers (src/handling.rs):
+   * grip = mean combined g while braking or cornering, as % of the session peak;
+   * balance = mean steering excess over the most laterally loaded third (+ understeer);
+   * abs = % of braking samples with ABS active.
+   */
+  function handling(trace, a, b, peakG) {
+    if (!trace) return {};
+    const idx = [];
+    for (let j = a; j <= b; j++) idx.push(j);
+    const hasG = trace.lat_g && trace.lat_g.length;
+    let grip = null;
+    if (hasG && isNum(peakG)) {
+      const working = idx.filter((j) => trace.brake[j] >= 5 || Math.abs(trace.lat_g[j]) > 0.3 * peakG);
+      if (working.length) grip = (working.reduce((s, j) => s + Math.hypot(trace.lat_g[j], trace.long_g[j]), 0) / working.length / peakG) * 100;
+    }
+    let balance = null;
+    if (trace.balance_deg && trace.balance_deg.length) {
+      const load = (j) => (hasG ? Math.abs(trace.lat_g[j]) : Math.abs(trace.yaw_rate_dps[j] * trace.speed_kph[j]));
+      const loaded = idx.slice().sort((x, y) => load(y) - load(x)).slice(0, Math.max(1, Math.floor(idx.length / 3)));
+      balance = loaded.reduce((s, j) => s + trace.balance_deg[j], 0) / loaded.length;
+    }
+    let abs = null;
+    if (trace.abs && trace.abs.length) {
+      const braking = idx.filter((j) => trace.brake[j] >= 10);
+      abs = braking.length ? (braking.filter((j) => trace.abs[j]).length / braking.length) * 100 : 0;
+    }
+    return { grip, balance, abs };
+  }
+
+  function cornerStats(segments, sel, ref, lengthM, peakG) {
     if (!sel) return [];
     const n = sel.time_s.length - 1;
     return segments.map((seg) => {
@@ -554,8 +589,15 @@
       const timeRef = ref ? ref.time_s[b] - ref.time_s[a] : null;
       const bpSel = brakePoint(sel, a, apex);
       const bpRef = ref ? brakePoint(ref, a, apex) : null;
+      const hSel = handling(sel, a, b, peakG);
+      const hRef = handling(ref, a, b, peakG);
       return {
         ...seg,
+        gripSel: hSel.grip,
+        gripRef: isNum(hRef.grip) ? hRef.grip : null,
+        balSel: hSel.balance,
+        balRef: isNum(hRef.balance) ? hRef.balance : null,
+        absSel: hSel.abs,
         minSel,
         minRef: ref ? minRef : null,
         delta: ref ? timeSel - timeRef : null,
@@ -751,6 +793,11 @@
       .sort((a, b) => b.delta - a.delta);
     const worst = new Set(losses.filter((c) => c.delta > 0.02).slice(0, 3).map((c) => c.label));
     const maxAbs = Math.max(0.05, ...corners.map((c) => Math.abs(c.delta || 0)));
+    const hasGrip = corners.some((c) => isNum(c.gripSel));
+    const hasBal = corners.some((c) => isNum(c.balSel));
+    const hasAbs = corners.some((c) => isNum(c.absSel));
+    const cmp = (sel, ref, digits, unit) =>
+      isNum(ref) ? `${fmtNum(sel, digits)}${unit} on this lap, ${fmtNum(ref, digits)}${unit} on the reference` : `${fmtNum(sel, digits)}${unit}`;
 
     return html`<div className="corner-wrap">
       <table className="corners">
@@ -761,6 +808,9 @@
             <th className="l bar-col"></th>
             <th>Min kph</th>
             ${hasRef ? html`<th>vs ref</th><th>Brake</th>` : null}
+            ${hasGrip ? html`<th title="Average grip used while braking and cornering, as % of the session's peak">Grip</th>` : null}
+            ${hasBal ? html`<th title="Mid-corner steering beyond what the car's rotation needed. + understeer, − oversteer. Compare laps, not corners.">Balance</th>` : null}
+            ${hasAbs ? html`<th title="Share of braking with ABS active">ABS</th>` : null}
           </tr>
         </thead>
         <tbody>
@@ -801,6 +851,17 @@
                       ${isNum(c.brakeLaterM) ? (Math.abs(c.brakeLaterM) < 3 ? "same" : `${Math.abs(c.brakeLaterM).toFixed(0)} m ${c.brakeLaterM > 0 ? "later" : "earlier"}`) : "—"}
                     </td>`
                 : null}
+              ${hasGrip
+                ? html`<td className=${isNum(c.gripRef) ? (c.gripSel - c.gripRef >= 3 ? "good" : c.gripSel - c.gripRef <= -3 ? "bad" : "") : ""} title=${cmp(c.gripSel, c.gripRef, 0, "%")}>
+                    ${isNum(c.gripSel) ? `${c.gripSel.toFixed(0)}%` : "—"}
+                  </td>`
+                : null}
+              ${hasBal
+                ? html`<td className="faint" title=${cmp(c.balSel, c.balRef, 1, "°")}>
+                    ${isNum(c.balSel) ? html`${fmtSigned(c.balSel, 0)}°${isNum(c.balRef) ? html`<span className="bal-ref"> (${fmtSigned(c.balSel - c.balRef, 0)})</span>` : null}` : "—"}
+                  </td>`
+                : null}
+              ${hasAbs ? html`<td className=${c.absSel >= 40 ? "bad" : "faint"}>${isNum(c.absSel) ? `${c.absSel.toFixed(0)}%` : "—"}</td>` : null}
             </tr>`;
           })}
         </tbody>
@@ -817,6 +878,9 @@
     { key: "brake", label: "Brake", unit: "%", h: 64, fixed: [0, 100] },
     { key: "gear", label: "Gear", h: 56, step: true },
     { key: "steer_deg", label: "Steering", unit: "°", h: 72, symmetric: true },
+    { key: "lat_g", label: "Lateral g", unit: "g", h: 64, symmetric: true, minSpan: 0.5, digits: 2 },
+    { key: "long_g", label: "Long g", unit: "g", h: 64, symmetric: true, minSpan: 0.5, digits: 2 },
+    { key: "balance_deg", label: "Balance · + under / − over", unit: "°", h: 72, symmetric: true, signed: true },
   ];
 
   function TraceChart({ sel, refTrace: ref, lengthM, turns, sectorPcts, cursorPct, onCursor, view, setView }) {
@@ -836,7 +900,7 @@
     const channel = (trace, key) => (key === "delta" ? (trace === sel ? delta : null) : trace && trace[key]);
 
     let y = pad.top;
-    const layout = PANELS.map((p) => {
+    const layout = PANELS.filter((p) => p.key === "delta" || (sel[p.key] && sel[p.key].length)).map((p) => {
       const top = y;
       y += p.h + pad.gap;
       return { ...p, top };
@@ -855,7 +919,7 @@
       let lo = Math.min(...values);
       let hi = Math.max(...values);
       if (p.key === "delta" || p.symmetric) {
-        const m = Math.max(Math.abs(lo), Math.abs(hi), p.key === "delta" ? 0.05 : 5);
+        const m = Math.max(Math.abs(lo), Math.abs(hi), p.key === "delta" ? 0.05 : p.minSpan || 5);
         return [-m * 1.1, m * 1.1];
       }
       if (p.step) return [Math.min(0, lo) - 0.5, hi + 0.5];
@@ -877,6 +941,22 @@
       return d;
     }
 
+    /** Strip along the top of the brake panel wherever ABS was active on the selected lap. */
+    function absMarks(abs, p) {
+      let d = "";
+      let start = null;
+      for (let j = i0; j <= i1 + 1; j++) {
+        const on = j <= i1 && abs[j];
+        if (on && start === null) start = j;
+        if (!on && start !== null) {
+          const x0 = x(start);
+          d += `M${x0.toFixed(1)},${p.top + 1}H${Math.max(x0 + 1.5, x(j - 1)).toFixed(1)}v4H${x0.toFixed(1)}Z`;
+          start = null;
+        }
+      }
+      return d;
+    }
+
     const cursorIdx = isNum(cursorPct) ? idxOf(cursorPct, n) : null;
     const pctFromEvent = (e) => {
       const rect = e.currentTarget.getBoundingClientRect();
@@ -889,7 +969,8 @@
       if (!isNum(v)) return "—";
       if (p.key === "delta") return fmtDelta(v);
       if (p.key === "gear") return v === 0 ? "N" : v < 0 ? "R" : String(v);
-      return v.toFixed(p.key === "steer_deg" ? 0 : 0) + (p.unit === "%" ? "%" : "");
+      if (p.signed) return fmtSigned(v, 0) + p.unit;
+      return v.toFixed(p.digits || 0) + (p.unit === "%" || p.unit === "g" ? p.unit : "");
     };
 
     return html`<div ref=${wrapRef} className="trace-wrap">
@@ -958,10 +1039,11 @@
                     <path className="trace-line delta" d=${line(selArr, p, dom)} />
                   <//>`
                 : null}
+              ${p.key === "brake" && sel.abs && sel.abs.length ? html`<path className="abs-marks" d=${absMarks(sel.abs, p)} />` : null}
               ${refArr ? html`<path className="trace-line ref" d=${line(refArr, p, dom, p.step)} />` : null}
               ${selArr && p.key !== "delta" ? html`<path className="trace-line sel" d=${line(selArr, p, dom, p.step)} />` : null}
             </g>
-            <text className="panel-label" x=${pad.l + 6} y=${p.top + 13}>${p.label}</text>
+            <text className="panel-label" x=${pad.l + 6} y=${p.top + 13}>${p.key === "brake" && sel.abs && sel.abs.length ? "Brake · ABS marked" : p.label}</text>
             ${cursorIdx !== null
               ? html`<text className="panel-readout" x=${pad.l + plotW - 6} y=${p.top + 13}>
                   ${p.key === "delta"
@@ -990,6 +1072,91 @@
         <span>${Math.round(r0 * lengthM)} m – ${Math.round(r1 * lengthM)} m</span>
         <span className="faint">Drag to zoom · double-click to reset</span>
       </div>
+    </div>`;
+  }
+
+  // ---------- Grip circle ----------
+
+  /**
+   * Friction circle (g-g plot) for the part of the lap in view: every point is one sample of
+   * lateral vs longitudinal g. A lap that fills the circle out to the session peak, including
+   * the diagonals (trail braking into the corner, throttle on the way out), is using the grip.
+   */
+  function GripCircle({ sel, refTrace: ref, view, peakG, cursorPct, onCursor, selected, refNumber }) {
+    const svgRef = useRef(null);
+    const n = sel.time_s.length - 1;
+    const i0 = Math.max(0, Math.floor(view[0] * n));
+    const i1 = Math.min(n, Math.ceil(view[1] * n));
+    const step = Math.max(1, Math.floor((i1 - i0) / 900));
+    const size = 260;
+    const c = size / 2;
+    const extent = useMemo(() => {
+      let m = isNum(peakG) ? peakG * 1.12 : 1;
+      for (const t of [sel, ref]) {
+        if (!t) continue;
+        for (let j = 0; j <= n; j += 4) m = Math.max(m, Math.abs(t.lat_g[j]), Math.abs(t.long_g[j]));
+      }
+      return Math.ceil(m * 2) / 2;
+    }, [sel, ref, peakG]);
+    const r = (c - 18) / extent;
+    const px = (g) => c + g * r;
+    const py = (g) => c - g * r; // acceleration up, braking down
+
+    const dots = (t) => {
+      let d = "";
+      for (let j = i0; j <= i1; j += step) d += `M${px(t.lat_g[j]).toFixed(1)},${py(t.long_g[j]).toFixed(1)}h0`;
+      return d;
+    };
+    const rings = [];
+    for (let g = 1; g <= extent; g += 1) rings.push(g);
+
+    function onMove(e) {
+      const svg = svgRef.current;
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      const mx = ((e.clientX - rect.left) / rect.width) * size;
+      const my = ((e.clientY - rect.top) / rect.height) * size;
+      let best = null;
+      let bestD = 144; // within 12px
+      for (let j = i0; j <= i1; j += step) {
+        const d = (px(sel.lat_g[j]) - mx) ** 2 + (py(sel.long_g[j]) - my) ** 2;
+        if (d < bestD) {
+          bestD = d;
+          best = j;
+        }
+      }
+      if (best !== null) onCursor(best / n);
+    }
+
+    const ci = isNum(cursorPct) ? idxOf(cursorPct, n) : null;
+    const cur = ci !== null ? { lat: sel.lat_g[ci], long: sel.long_g[ci] } : null;
+    const curRef = ci !== null && ref ? { lat: ref.lat_g[ci], long: ref.long_g[ci] } : null;
+    const pctOfPeak = (p) => (isNum(peakG) ? ` · ${((Math.hypot(p.lat, p.long) / peakG) * 100).toFixed(0)}% of peak` : "");
+
+    return html`<div className="grip-circle">
+      <div className="section-label">Grip circle</div>
+      <svg ref=${svgRef} viewBox=${`0 0 ${size} ${size}`} role="img" aria-label="Lateral versus longitudinal g" onMouseMove=${onMove} onMouseLeave=${() => onCursor(null)}>
+        <line className="gg-axis" x1=${px(-extent)} x2=${px(extent)} y1=${c} y2=${c} />
+        <line className="gg-axis" x1=${c} x2=${c} y1=${py(extent)} y2=${py(-extent)} />
+        ${rings.map((g) => html`<g key=${g}>
+          <circle className="gg-ring" cx=${c} cy=${c} r=${g * r} />
+          <text className="gg-tick" x=${c + 3} y=${py(g) - 3}>${g}g</text>
+        </g>`)}
+        ${isNum(peakG) ? html`<circle className="gg-peak" cx=${c} cy=${c} r=${peakG * r}><title>Session peak ${peakG.toFixed(2)} g</title></circle>` : null}
+        <text className="gg-edge" x=${c} y=${10}>Accel</text>
+        <text className="gg-edge" x=${c} y=${size - 3}>Brake</text>
+        ${ref && ref.lat_g ? html`<path className="gg-dots ref" d=${dots(ref)} />` : null}
+        <path className="gg-dots sel" d=${dots(sel)} />
+        ${curRef ? html`<circle className="gg-cursor ref" cx=${px(curRef.lat)} cy=${py(curRef.long)} r="4.5" />` : null}
+        ${cur ? html`<circle className="gg-cursor sel" cx=${px(cur.lat)} cy=${py(cur.long)} r="4.5" />` : null}
+      </svg>
+      <div className="gg-readout mono">
+        ${cur
+          ? html`<div><span className="sel-fill">Lap ${selected}</span> ${fmtSigned(cur.lat, 2)} lat ${fmtSigned(cur.long, 2)} long${pctOfPeak(cur)}</div>
+              ${curRef ? html`<div><span className="ref-fill">Lap ${refNumber}</span> ${fmtSigned(curRef.lat, 2)} lat ${fmtSigned(curRef.long, 2)} long${pctOfPeak(curRef)}</div>` : null}`
+          : html`<div className="faint">${view[0] > 0 || view[1] < 1 ? "Showing the zoomed section" : "Showing the whole lap"} · hover for values</div>`}
+      </div>
+      <p className="faint gg-note">The dashed ring is the session's peak grip. Points filling toward it, including the diagonals (trail braking in, throttle out), mean the tyres are being used.</p>
     </div>`;
   }
 
@@ -1035,7 +1202,7 @@
     const sel = selTraced ? traces[selected] : null;
     const ref = refTraced ? traces[refNumber] : null;
     const segments = useMemo(() => (map ? turnSegments(map.turns) : []), [map]);
-    const corners = useMemo(() => (map && sel ? cornerStats(segments, sel, ref, map.length_m) : []), [segments, sel, ref]);
+    const corners = useMemo(() => (map && sel ? cornerStats(segments, sel, ref, map.length_m, split.peak_g) : []), [segments, sel, ref, split.peak_g]);
 
     const selectTurn = (i) => {
       setActiveTurn(i);
@@ -1173,17 +1340,31 @@
                   : null}
               </div>
             </div>
-            <${TraceChart}
-              sel=${sel}
-              refTrace=${ref}
-              lengthM=${map.length_m}
-              turns=${map.turns}
-              sectorPcts=${map.sector_pcts || []}
-              cursorPct=${cursorPct}
-              onCursor=${setCursorPct}
-              view=${view}
-              setView=${setView}
-            />
+            <div className=${sel.lat_g && sel.lat_g.length ? "telemetry-grid" : ""}>
+              <${TraceChart}
+                sel=${sel}
+                refTrace=${ref}
+                lengthM=${map.length_m}
+                turns=${map.turns}
+                sectorPcts=${map.sector_pcts || []}
+                cursorPct=${cursorPct}
+                onCursor=${setCursorPct}
+                view=${view}
+                setView=${setView}
+              />
+              ${sel.lat_g && sel.lat_g.length
+                ? html`<${GripCircle}
+                    sel=${sel}
+                    refTrace=${ref && ref.lat_g && ref.lat_g.length ? ref : null}
+                    view=${view}
+                    peakG=${split.peak_g}
+                    cursorPct=${cursorPct}
+                    onCursor=${setCursorPct}
+                    selected=${selected}
+                    refNumber=${refNumber}
+                  />`
+                : null}
+            </div>
           </section>`
         : null}
     <//>`;

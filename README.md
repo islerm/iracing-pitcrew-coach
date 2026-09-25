@@ -5,7 +5,9 @@ A local practice coach for iRacing. Record a stint live, or open an `.ibt` telem
 - lap times and sectors;
 - a track map with turn numbers;
 - corner-by-corner comparisons;
-- telemetry overlays;
+- telemetry overlays, including lateral/longitudinal g and understeer/oversteer balance;
+- a grip circle (g-g plot) showing how much of the tyres' grip each lap and corner used;
+- per-corner grip use, balance and ABS use (for cars and files that record `BrakeABSactive`);
 - written feedback from a local Ollama model.
 
 ## Requirements

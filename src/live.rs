@@ -168,6 +168,10 @@ fn capture_live_telemetry(
             tyre_avg: if temps.is_empty() { f32::NAN } else { temps.iter().sum::<f32>() / temps.len() as f32 },
             tyre_min: temps.iter().copied().fold(f32::NAN, f32::min),
             tyre_max: temps.iter().copied().fold(f32::NAN, f32::max),
+            lat_accel: nan(num(&telem, "LatAccel")) as f32,
+            long_accel: nan(num(&telem, "LongAccel")) as f32,
+            yaw_rate: nan(num(&telem, "YawRate")) as f32,
+            abs_active: nan(num(&telem, "BrakeABSactive")) as f32,
         };
 
         if verbose {

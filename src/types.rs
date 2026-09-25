@@ -57,4 +57,6 @@ pub struct SessionSummary {
     pub tyre_temp_avg_c: Option<f64>,
     pub tyre_temp_delta_c: Option<f64>,
     pub suggestions: Vec<String>,
+    /// Corner-by-corner findings from the lap traces (see `handling::corner_notes`).
+    pub corner_notes: Vec<String>,
 }

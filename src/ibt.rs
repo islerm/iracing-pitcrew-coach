@@ -184,6 +184,10 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
     let v_lon = find("Lon");
     let v_pit = find("OnPitRoad");
     let v_last_lap = find("LapLastLapTime");
+    let v_lat_accel = find("LatAccel");
+    let v_long_accel = find("LongAccel");
+    let v_yaw_rate = find("YawRate");
+    let v_abs = find("BrakeABSactive");
     let v_tyres: Vec<Option<Var>> = ["LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL"].iter().map(|n| find(n)).collect();
     if v_lap.is_none() || v_pct.is_none() || v_time.is_none() {
         bail!("{} is missing Lap/LapDistPct/SessionTime channels", path.display());
@@ -216,6 +220,10 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
             tyre_avg: if temps.is_empty() { f32::NAN } else { temps.iter().sum::<f32>() / temps.len() as f32 },
             tyre_min: temps.iter().copied().fold(f32::NAN, f32::min),
             tyre_max: temps.iter().copied().fold(f32::NAN, f32::max),
+            lat_accel: nan(read_value(&sample, &v_lat_accel)) as f32,
+            long_accel: nan(read_value(&sample, &v_long_accel)) as f32,
+            yaw_rate: nan(read_value(&sample, &v_yaw_rate)) as f32,
+            abs_active: nan(read_value(&sample, &v_abs)) as f32,
         });
     }
 
@@ -230,6 +238,8 @@ const FIXTURE_CHANNELS: &[&str] = &[
     "SessionTime", "Lap", "LapDistPct", "LapDist", "LapLastLapTime", "Speed", "RPM", "Gear",
     "Throttle", "Brake", "SteeringWheelAngle", "Yaw", "YawNorth", "Lat", "Lon", "LatAccel",
     "LongAccel", "OnPitRoad", "IsOnTrack", "LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL",
+    "YawRate", "BrakeABSactive", "BrakeRaw", "VelocityX", "VelocityY", "FuelLevel", "FuelUsePerHour",
+    "dcBrakeBias", "dcABS", "dcTractionControl", "TrackTempCrew", "AirTemp",
 ];
 
 fn type_size(ty: i32) -> usize {

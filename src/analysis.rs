@@ -30,6 +30,7 @@ pub fn summarize_session(laps: &[LapMetrics]) -> SessionSummary {
                 "No complete laps were recorded in this split, so there is no valid fastest lap yet.".to_string(),
                 "Keep recording until you cross the finish line again so the app can compare full laps.".to_string(),
             ],
+            corner_notes: Vec::new(),
         };
     }
 
@@ -101,7 +102,18 @@ pub fn summarize_session(laps: &[LapMetrics]) -> SessionSummary {
         tyre_temp_avg_c: avg_temp,
         tyre_temp_delta_c: if temp_delta > 0.0 { Some(temp_delta) } else { None },
         suggestions,
+        corner_notes: Vec::new(),
     }
+}
+
+/// Adds corner findings to a summary: kept for the coach prompt, and the top ones lead the
+/// suggestions list since they're the most specific advice available.
+pub fn add_corner_notes(summary: &mut SessionSummary, notes: Vec<String>) {
+    let at = usize::from(summary.slowest_sector_name.is_some()).min(summary.suggestions.len());
+    for (i, note) in notes.iter().enumerate() {
+        summary.suggestions.insert(at + i, note.clone());
+    }
+    summary.corner_notes = notes;
 }
 
 /// Measurements available for this run, one per line. Missing data is left out rather than
@@ -125,6 +137,10 @@ fn data_lines(summary: &SessionSummary) -> String {
     }
     if let Some(spread) = summary.tyre_temp_delta_c {
         lines.push(format!("Tyre temp spread: {spread:.1}C"));
+    }
+    if !summary.corner_notes.is_empty() {
+        lines.push("Corners where the fastest lap lost the most time vs the driver's best in that corner:".to_string());
+        lines.extend(summary.corner_notes.iter().map(|note| format!("- {note}")));
     }
     lines.join("\n")
 }

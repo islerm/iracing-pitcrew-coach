@@ -1,6 +1,7 @@
 mod analysis;
 mod cli;
 mod coach;
+mod handling;
 mod ibt;
 mod io;
 mod live;
