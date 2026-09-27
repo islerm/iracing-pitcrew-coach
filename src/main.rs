@@ -1,6 +1,8 @@
 mod analysis;
 mod cli;
 mod coach;
+mod corner;
+mod gears;
 mod handling;
 mod ibt;
 mod io;

@@ -105,6 +105,8 @@ fn capture_live_telemetry(
                     .unwrap_or(0.0),
                 sector_pcts: Vec::new(),
                 car,
+                shift_rpm: Some(session.drivers.shift_light_shift_rpm as f64).filter(|v| *v > 0.0),
+                redline_rpm: Some(session.drivers.red_line_rpm as f64).filter(|v| *v > 0.0),
             })
         }
         Err(err) => {
@@ -172,6 +174,10 @@ fn capture_live_telemetry(
             long_accel: nan(num(&telem, "LongAccel")) as f32,
             yaw_rate: nan(num(&telem, "YawRate")) as f32,
             abs_active: nan(num(&telem, "BrakeABSactive")) as f32,
+            track_surface: num(&telem, "PlayerTrackSurface").map(|v| v as i8),
+            incidents: nan(num(&telem, "PlayerCarMyIncidentCount")) as f32,
+            rpm: nan(num(&telem, "RPM")) as f32,
+            alt: nan(num(&telem, "Alt")) as f32,
         };
 
         if verbose {

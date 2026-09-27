@@ -53,6 +53,8 @@ pub fn parse_csv_laps(path: &Path) -> Result<Vec<LapMetrics>> {
             avg_speed_kph: avg_speed,
             tyre_temp_avg_c: temp_avg,
             tyre_temp_delta_c: temp_delta,
+            off_track_pcts: Vec::new(),
+            incidents: None,
         });
     }
 

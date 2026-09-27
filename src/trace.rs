@@ -33,6 +33,14 @@ pub struct Frame {
     pub yaw_rate: f32,
     /// `BrakeABSactive` as 1.0/0.0. NaN for cars or files without it.
     pub abs_active: f32,
+    /// `PlayerTrackSurface` (iRacing's TrkLoc: 0 = off track, 3 = on track). `None` when missing.
+    pub track_surface: Option<i8>,
+    /// `PlayerCarMyIncidentCount`, cumulative over the session. NaN when missing.
+    pub incidents: f32,
+    /// Engine RPM. NaN when missing.
+    pub rpm: f32,
+    /// `Alt`: altitude in metres. Only in .ibt files (live telemetry has no position data).
+    pub alt: f32,
 }
 
 impl Default for Frame {
@@ -58,6 +66,10 @@ impl Default for Frame {
             long_accel: f32::NAN,
             yaw_rate: f32::NAN,
             abs_active: f32::NAN,
+            track_surface: None,
+            incidents: f32::NAN,
+            rpm: f32::NAN,
+            alt: f32::NAN,
         }
     }
 }
@@ -72,6 +84,10 @@ pub struct TrackInfo {
     /// Sector start points as lap fractions, starting with 0.0.
     pub sector_pcts: Vec<f64>,
     pub car: String,
+    /// RPM where the car's shift light says to change up (`DriverCarSLShiftRPM`).
+    pub shift_rpm: Option<f64>,
+    /// `DriverCarRedLine`.
+    pub redline_rpm: Option<f64>,
 }
 
 /// Channels resampled onto a fixed lap-distance grid (`n + 1` points from 0.0 to 1.0),
@@ -100,6 +116,12 @@ pub struct LapTrace {
     /// car's rotation needed. Positive = understeer, negative = oversteer. See `handling`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub balance_deg: Vec<f32>,
+    /// Engine RPM. Empty when the source has no RPM channel.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rpm: Vec<f32>,
+    /// Altitude in metres. Empty for live recordings, which have no position data.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alt_m: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -168,6 +190,30 @@ pub(crate) fn is_continuous(frames: &[Frame]) -> bool {
         })
 }
 
+/// iRacing's `PlayerTrackSurface` value for "off track".
+const SURFACE_OFF_TRACK: i8 = 0;
+
+/// Where the lap went off track (one lap fraction per excursion; brief returns to the
+/// surface within a second count as the same excursion) and how many incident points it
+/// picked up. `prev` is the last frame before the lap, the baseline for the incident count.
+pub(crate) fn lap_off_tracks(prev: Option<&Frame>, frames: &[Frame]) -> (Vec<f64>, Option<u32>) {
+    let mut pcts = Vec::new();
+    let mut last_off: Option<f64> = None;
+    for f in frames {
+        if f.track_surface == Some(SURFACE_OFF_TRACK) && !f.on_pit_road {
+            if last_off.map_or(true, |t| f.time - t > 1.0) && f.pct.is_finite() {
+                pcts.push(f.pct);
+            }
+            last_off = Some(f.time);
+        }
+    }
+
+    let counts = prev.into_iter().chain(frames).map(|f| f.incidents).filter(|v| v.is_finite());
+    let (first, last) = counts.fold((None, None), |(first, _), v| (first.or(Some(v)), Some(v)));
+    let incidents = first.zip(last).map(|(a, b)| (b - a).max(0.0).round() as u32);
+    (pcts, incidents)
+}
+
 struct GridPoint {
     pct: f64,
     time: f64,
@@ -208,6 +254,8 @@ fn resample(points: &[GridPoint], lap_number: i32, n: usize) -> Resampled {
             yaw_rate_dps: Vec::with_capacity(n + 1),
             abs: Vec::with_capacity(n + 1),
             balance_deg: Vec::new(),
+            rpm: Vec::with_capacity(n + 1),
+            alt_m: Vec::with_capacity(n + 1),
         },
         yaw: Vec::with_capacity(n + 1),
         lat: Vec::with_capacity(n + 1),
@@ -237,6 +285,8 @@ fn resample(points: &[GridPoint], lap_number: i32, n: usize) -> Resampled {
         trace.long_g.push(round2(interpolate(fa.long_accel, fb.long_accel, t) / G));
         trace.yaw_rate_dps.push(round2(interpolate(fa.yaw_rate, fb.yaw_rate, t).to_degrees()));
         trace.abs.push(if t < 0.5 { fa.abs_active } else { fb.abs_active } as u8);
+        trace.rpm.push(interpolate(fa.rpm, fb.rpm, t).round());
+        trace.alt_m.push(round2(interpolate(fa.alt, fb.alt, t)));
         abs_seen |= fa.abs_active.is_finite();
         out.yaw.push(a.yaw_unwrapped + (b.yaw_unwrapped - a.yaw_unwrapped) * t);
         out.lat.push(fa.lat + (fb.lat - fa.lat) * t);
@@ -246,6 +296,12 @@ fn resample(points: &[GridPoint], lap_number: i32, n: usize) -> Resampled {
     let trace = &mut out.trace;
     if !abs_seen {
         trace.abs.clear();
+    }
+    if trace.rpm.iter().any(|v| !v.is_finite()) {
+        trace.rpm.clear();
+    }
+    if trace.alt_m.iter().any(|v| !v.is_finite()) {
+        trace.alt_m.clear();
     }
     if trace.lat_g.iter().chain(&trace.long_g).any(|v| !v.is_finite()) {
         trace.lat_g.clear();
@@ -340,6 +396,7 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
         let tyre_temp_avg_c = (tyres_live && !tyre_avgs.is_empty()).then(|| tyre_avgs.iter().sum::<f64>() / tyre_avgs.len() as f64);
         let tyre_temp_delta_c = tyres_live.then(|| (tyre_max - tyre_min) as f64);
         let avg_speed_kph = (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64 * 3.6);
+        let (off_track_pcts, incidents) = lap_off_tracks(prev, lap_frames);
 
         let (Some(t0), Some(t1)) = (start_time, end_time) else {
             laps.push(LapMetrics {
@@ -350,6 +407,8 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
                 avg_speed_kph,
                 tyre_temp_avg_c,
                 tyre_temp_delta_c,
+                off_track_pcts,
+                incidents,
             });
             continue;
         };
@@ -419,6 +478,8 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
             },
             tyre_temp_avg_c,
             tyre_temp_delta_c,
+            off_track_pcts,
+            incidents,
         });
 
         if complete {
@@ -748,5 +809,31 @@ mod tests {
         let rms = heading_vs_gps_rms(&data.frames, &data.track);
         println!("heading vs GPS outline: {rms:.1} m RMS");
         assert!(rms < 30.0);
+    }
+
+    #[test]
+    fn off_tracks_and_incidents_per_lap() {
+        // 10 Hz lap: off at 20% for 0.3 s, a 0.5 s blip back on (same excursion), then off
+        // again at 60% (a new one). Incidents go 2 → 4, counted from the frame before the lap.
+        let frame = |i: usize| {
+            let pct = i as f64 / 100.0;
+            let off = (20..23).contains(&i) || (28..30).contains(&i) || (60..62).contains(&i);
+            Frame {
+                time: i as f64 * 0.1,
+                pct,
+                track_surface: Some(if off { SURFACE_OFF_TRACK } else { 3 }),
+                incidents: if i < 22 { 2.0 } else { 4.0 },
+                ..Frame::default()
+            }
+        };
+        let frames: Vec<Frame> = (0..100).map(frame).collect();
+        let prev = Frame { incidents: 2.0, ..Frame::default() };
+        let (pcts, incidents) = lap_off_tracks(Some(&prev), &frames);
+        assert_eq!(pcts, vec![0.2, 0.6]);
+        assert_eq!(incidents, Some(2));
+
+        // Files without the channels report nothing, not zero.
+        let bare: Vec<Frame> = (0..10).map(|i| Frame { time: i as f64, ..Frame::default() }).collect();
+        assert_eq!(lap_off_tracks(None, &bare), (Vec::new(), None));
     }
 }

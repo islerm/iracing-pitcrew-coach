@@ -44,6 +44,11 @@ pub struct LapMetrics {
     pub avg_speed_kph: Option<f64>,
     pub tyre_temp_avg_c: Option<f64>,
     pub tyre_temp_delta_c: Option<f64>,
+    /// Lap fractions where the car left the track. Empty when it stayed on, or when the
+    /// source has no track-surface channel.
+    pub off_track_pcts: Vec<f64>,
+    /// Incident points picked up during the lap. `None` when the source has no incident count.
+    pub incidents: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

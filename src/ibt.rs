@@ -96,6 +96,8 @@ pub fn parse_track_info(yaml: &str) -> TrackInfo {
         }
     }
 
+    let rpm = |key: &str| get(key).parse::<f64>().ok().filter(|v| *v > 0.0);
+
     TrackInfo {
         track_name: get("TrackName"),
         display_name: get("TrackDisplayName"),
@@ -103,6 +105,8 @@ pub fn parse_track_info(yaml: &str) -> TrackInfo {
         length_m,
         sector_pcts,
         car,
+        shift_rpm: rpm("DriverCarSLShiftRPM"),
+        redline_rpm: rpm("DriverCarRedLine"),
     }
 }
 
@@ -188,6 +192,10 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
     let v_long_accel = find("LongAccel");
     let v_yaw_rate = find("YawRate");
     let v_abs = find("BrakeABSactive");
+    let v_surface = find("PlayerTrackSurface");
+    let v_incidents = find("PlayerCarMyIncidentCount");
+    let v_rpm = find("RPM");
+    let v_alt = find("Alt");
     let v_tyres: Vec<Option<Var>> = ["LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL"].iter().map(|n| find(n)).collect();
     if v_lap.is_none() || v_pct.is_none() || v_time.is_none() {
         bail!("{} is missing Lap/LapDistPct/SessionTime channels", path.display());
@@ -224,6 +232,10 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
             long_accel: nan(read_value(&sample, &v_long_accel)) as f32,
             yaw_rate: nan(read_value(&sample, &v_yaw_rate)) as f32,
             abs_active: nan(read_value(&sample, &v_abs)) as f32,
+            track_surface: read_value(&sample, &v_surface).map(|v| v as i8),
+            incidents: nan(read_value(&sample, &v_incidents)) as f32,
+            rpm: nan(read_value(&sample, &v_rpm)) as f32,
+            alt: nan(read_value(&sample, &v_alt)) as f32,
         });
     }
 
@@ -237,8 +249,8 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
 const FIXTURE_CHANNELS: &[&str] = &[
     "SessionTime", "Lap", "LapDistPct", "LapDist", "LapLastLapTime", "Speed", "RPM", "Gear",
     "Throttle", "Brake", "SteeringWheelAngle", "Yaw", "YawNorth", "Lat", "Lon", "LatAccel",
-    "LongAccel", "OnPitRoad", "IsOnTrack", "LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL",
-    "YawRate", "BrakeABSactive", "BrakeRaw", "VelocityX", "VelocityY", "FuelLevel", "FuelUsePerHour",
+    "Alt", "LongAccel", "OnPitRoad", "IsOnTrack", "LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL",
+    "YawRate", "BrakeABSactive", "PlayerTrackSurface", "PlayerCarMyIncidentCount", "BrakeRaw", "VelocityX", "VelocityY", "FuelLevel", "FuelUsePerHour",
     "dcBrakeBias", "dcABS", "dcTractionControl", "TrackTempCrew", "AirTemp",
 ];
 
@@ -265,6 +277,12 @@ fn fixture_yaml(original: &str, track: &TrackInfo) -> String {
     }
     yaml += "DriverInfo:\n DriverCarIdx: 0\n Drivers:\n - CarIdx: 0\n   UserName: Test Driver\n";
     yaml += &format!("   CarScreenName: {}\n", track.car);
+    // Car constants, not personal: the shift light and redline, for the gear analysis.
+    for (key, value) in [("DriverCarSLShiftRPM", track.shift_rpm), ("DriverCarRedLine", track.redline_rpm)] {
+        if let Some(v) = value {
+            yaml += &format!(" {key}: {v:.3}\n");
+        }
+    }
     yaml += "...\n";
     yaml
 }

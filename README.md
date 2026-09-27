@@ -2,11 +2,13 @@
 
 A local practice coach for iRacing. Record a stint live, or open an `.ibt` telemetry file, to get:
 
-- lap times and sectors;
-- a track map with turn numbers;
-- corner-by-corner comparisons;
-- telemetry overlays, including lateral/longitudinal g and understeer/oversteer balance;
-- a grip circle (g-g plot) showing how much of the tyres' grip each lap and corner used;
+- lap times and sectors, with laps that went off track marked `!` (and incident points, from `PlayerTrackSurface` / `PlayerCarMyIncidentCount`);
+- a track map with turn numbers; hover it to see where the comparison lap was at the same moment;
+- corner-by-corner comparisons: click a turn for an entry/exit breakdown against the comparison lap or your typical lap, and ask the coach model about that corner;
+- telemetry overlays next to the track map, including RPM, elevation (`.ibt` only), lateral/longitudinal g and understeer/oversteer balance;
+- a grip circle (g-g plot) showing how much of the tyres' grip each lap and corner used, with a built-in guide to reading it;
+- upshift analysis against the car's shift light and redline (early/late shifts, time on the rev limiter), and which gear was quicker through each corner;
+- elevation-aware corner notes (downhill braking zones, crests, compressions) for the corner coach;
 - per-corner grip use, balance and ABS use (for cars and files that record `BrakeABSactive`);
 - written feedback from a local Ollama model.
 

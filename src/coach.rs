@@ -45,33 +45,51 @@ fn find_executable(command: &str) -> Option<String> {
 }
 
 pub fn generate_feedback(summary: &SessionSummary, model_name: &str) -> String {
-    let ollama_path = find_executable("ollama");
-    let Some(ollama_path) = ollama_path else {
-        return "Ollama is not installed or not on PATH. Fallback analysis: focus on the sector where you lose the most time, and smooth your braking and throttle there.".to_string();
-    };
+    match ask_model(&build_prompt(summary), model_name) {
+        Ok(text) => text,
+        Err(ModelError::NotInstalled) => "Ollama is not installed or not on PATH. Fallback analysis: focus on the sector where you lose the most time, and smooth your braking and throttle there.".to_string(),
+        Err(ModelError::Failed(_)) => summary.suggestions.join("; "),
+    }
+}
 
-    let prompt = build_prompt(summary);
-    match Command::new(ollama_path)
+#[derive(Debug)]
+pub enum ModelError {
+    NotInstalled,
+    Failed(String),
+}
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelError::NotInstalled => write!(f, "Ollama is not installed or not on PATH."),
+            ModelError::Failed(reason) => write!(f, "The coach model didn't answer: {reason}"),
+        }
+    }
+}
+
+/// Runs one prompt through the local Ollama model and returns the cleaned-up answer.
+pub fn ask_model(prompt: &str, model_name: &str) -> Result<String, ModelError> {
+    let ollama_path = find_executable("ollama").ok_or(ModelError::NotInstalled)?;
+    let result = Command::new(ollama_path)
         .arg("run")
         .arg("--nowordwrap")
         .arg(model_name)
         .arg(prompt)
         .output()
-    {
-        Ok(result) if result.status.success() => {
-            let stdout = strip_ansi(&String::from_utf8_lossy(&result.stdout))
-                .trim()
-                .trim_matches('"')
-                .trim()
-                .to_string();
-            if !stdout.is_empty() {
-                stdout
-            } else {
-                summary.suggestions.join("; ")
-            }
-        }
-        Ok(_) => summary.suggestions.join("; "),
-        Err(_) => summary.suggestions.join("; "),
+        .map_err(|err| ModelError::Failed(err.to_string()))?;
+    if !result.status.success() {
+        let stderr = strip_ansi(&String::from_utf8_lossy(&result.stderr)).trim().to_string();
+        return Err(ModelError::Failed(if stderr.is_empty() { format!("exit status {}", result.status) } else { stderr }));
+    }
+    let stdout = strip_ansi(&String::from_utf8_lossy(&result.stdout))
+        .trim()
+        .trim_matches('"')
+        .trim()
+        .to_string();
+    if stdout.is_empty() {
+        Err(ModelError::Failed("empty answer".to_string()))
+    } else {
+        Ok(stdout)
     }
 }
 

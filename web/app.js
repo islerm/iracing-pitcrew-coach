@@ -458,13 +458,145 @@
               const d = best && lap.is_complete ? lap.lap_time_s - best.lap_time_s : null;
               const isBest = best && lap.lap_number === best.lap_number;
               return html`<div key=${lap.lap_number} className=${"lap-chip" + (isBest ? " is-best" : "")} style=${{ cursor: "default" }}>
-                <span className="n">L${lap.lap_number} ${!lap.is_complete ? html`<span className="tag tag-out">untimed</span>` : null}</span>
+                <span className="n">L${lap.lap_number} ${!lap.is_complete ? html`<span className="tag tag-out">untimed</span>` : null} <${OffTrackMark} lap=${lap} /></span>
                 <span className="t">${fmtLap(lap.lap_time_s)}</span>
                 <span className=${"d " + (isBest ? "purple" : deltaClass(d))}>${isBest ? "best" : d !== null ? fmtDelta(d) : " "}</span>
               </div>`;
             })}
           </div>`}
     </section>`;
+  }
+
+  // ---------- Off track ----------
+
+  const offTracks = (lap) => (lap && lap.off_track_pcts ? lap.off_track_pcts.length : 0);
+
+  function offTrackTitle(lap) {
+    const n = offTracks(lap);
+    if (!n) return "";
+    const inc = isNum(lap.incidents) && lap.incidents > 0 ? `, ${lap.incidents}x incident${lap.incidents === 1 ? "" : "s"}` : "";
+    return `Went off track ${n === 1 ? "once" : n + " times"}${inc}`;
+  }
+
+  function OffTrackMark({ lap }) {
+    if (!offTracks(lap)) return null;
+    const n = offTracks(lap);
+    return html`<span className="off-mark" title=${offTrackTitle(lap)} aria-label=${offTrackTitle(lap)}>!${n > 1 ? html`<small>${n}</small>` : null}</span>`;
+  }
+
+  // ---------- Lap bar (global lap selection) ----------
+
+  /**
+   * The one place laps are chosen. Everything below (map, corners, telemetry, grip circle,
+   * lap detail) shows the analysed lap against the comparison lap picked here.
+   */
+  function LapBar({ laps, stats, excluded, selected, compare, refNumber, autoRef, setSelected, setCompare, onPick }) {
+    const stripRef = useRef(null);
+    const timed = laps.filter((l) => l.is_complete);
+    const selLap = laps.find((l) => l.lap_number === selected);
+    const refLap = laps.find((l) => l.lap_number === refNumber);
+    const delta = selLap && refLap && selLap.is_complete && refLap.is_complete ? selLap.lap_time_s - refLap.lap_time_s : null;
+    const idx = laps.findIndex((l) => l.lap_number === selected);
+    const autoLap = laps.find((l) => l.lap_number === autoRef);
+    const lapOption = (l) => `Lap ${l.lap_number} · ${fmtLap(l.lap_time_s)}${!l.is_complete ? " (untimed)" : ""}${offTracks(l) ? " ⚠ off track" : ""}`;
+
+    // Sticky panels below (map, lap detail) sit just under the bar, whatever height it wraps to.
+    const barRef = useRef(null);
+    useEffect(() => {
+      const bar = barRef.current;
+      if (!bar) return undefined;
+      const root = document.documentElement.style;
+      const update = () => root.setProperty("--lapbar-h", `${Math.ceil(bar.getBoundingClientRect().height)}px`);
+      update();
+      const observer = new ResizeObserver(update);
+      observer.observe(bar);
+      return () => {
+        observer.disconnect();
+        root.removeProperty("--lapbar-h");
+      };
+    }, []);
+
+    // Keep the analysed lap in view in the strip.
+    useEffect(() => {
+      const strip = stripRef.current;
+      const chip = strip && strip.querySelector(".lap-chip.selected");
+      if (chip) chip.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }, [selected]);
+
+    return html`<div className="lap-bar" ref=${barRef}>
+      <div className="lap-bar-row">
+        <div className="lap-slot sel">
+          <span className="slot-label"><i className="sel-bg"></i>Analysing</span>
+          <button className="btn btn-ghost btn-icon" disabled=${idx <= 0} onClick=${() => setSelected(laps[idx - 1].lap_number)} aria-label="Previous lap">‹</button>
+          <select className="select" value=${selected === null ? "" : String(selected)} onChange=${(e) => setSelected(Number(e.target.value))} aria-label="Lap to analyse">
+            ${laps.map((l) => html`<option key=${l.lap_number} value=${l.lap_number}>${lapOption(l)}</option>`)}
+          </select>
+          <button className="btn btn-ghost btn-icon" disabled=${idx < 0 || idx >= laps.length - 1} onClick=${() => setSelected(laps[idx + 1].lap_number)} aria-label="Next lap">›</button>
+        </div>
+        <button
+          className="btn btn-ghost btn-icon swap"
+          title="Swap the two laps"
+          aria-label="Swap laps"
+          disabled=${refNumber === null || selected === null}
+          onClick=${() => {
+            const a = selected;
+            setSelected(refNumber);
+            setCompare(a);
+          }}
+        >⇄</button>
+        <div className="lap-slot ref">
+          <span className="slot-label"><i className="ref-bg"></i>Compared with</span>
+          <select
+            className="select"
+            value=${compare === null ? "auto" : String(compare)}
+            onChange=${(e) => setCompare(e.target.value === "auto" ? null : Number(e.target.value))}
+            aria-label="Lap to compare with"
+          >
+            <option value="auto">
+              ${autoLap
+                ? `Auto: ${stats && autoLap.lap_number === stats.best.lap_number ? "best" : "next best"} (lap ${autoLap.lap_number} · ${fmtLap(autoLap.lap_time_s)})`
+                : "Auto: best lap"}
+            </option>
+            ${timed.filter((l) => l.lap_number !== selected).map((l) => html`<option key=${l.lap_number} value=${l.lap_number}>${lapOption(l)}</option>`)}
+          </select>
+        </div>
+        ${delta !== null ? html`<span className=${"delta-chip " + deltaClass(delta)} title="Analysed lap minus comparison lap">${fmtDelta(delta)}</span>` : null}
+        <span className="lap-bar-hint faint">
+          Click a lap to analyse it · <b className="ref-text">vs</b> to compare · <span className="kbd">←</span><span className="kbd">→</span> step · <span className="kbd">B</span> best
+        </span>
+      </div>
+      <div className="lap-strip" ref=${stripRef}>
+        ${laps.map((lap) => {
+          const isBest = stats && lap.lap_number === stats.best.lap_number;
+          const isSel = lap.lap_number === selected;
+          const isRef = lap.lap_number === refNumber && !isSel;
+          const d = stats && lap.is_complete ? lap.lap_time_s - stats.best.lap_time_s : null;
+          const cls = [
+            "lap-chip",
+            isBest ? "is-best" : "",
+            !lap.is_complete || excluded.has(lap.lap_number) ? "excluded" : "",
+            isRef ? "compare" : "",
+            isSel ? "selected" : "",
+          ].join(" ");
+          return html`<div key=${lap.lap_number} className=${cls}>
+            <button className="chip-main" onClick=${(e) => onPick(lap.lap_number, e.shiftKey)} title=${offTrackTitle(lap) || `Analyse lap ${lap.lap_number}`}>
+              <span className="n">LAP ${lap.lap_number} <${OffTrackMark} lap=${lap} /></span>
+              <span className="t">${fmtLap(lap.lap_time_s)}</span>
+              <span className=${"d " + (isBest ? "purple" : deltaClass(d))}>${isBest ? "best" : !lap.is_complete ? "untimed" : fmtDelta(d)}</span>
+            </button>
+            ${isSel
+              ? html`<span className="chip-role sel">lap</span>`
+              : lap.is_complete
+                ? html`<button
+                    className=${"chip-role vs" + (isRef ? " on" : "")}
+                    title=${isRef ? (compare === null ? "Compared automatically (your best)" : "Click to go back to comparing with your best") : `Compare with lap ${lap.lap_number}`}
+                    onClick=${() => setCompare(isRef && compare !== null ? null : lap.lap_number)}
+                  >vs</button>`
+                : null}
+          </div>`;
+        })}
+      </div>
+    </div>`;
   }
 
   // ---------- Pace chart ----------
@@ -514,8 +646,9 @@
           lap.lap_number === selected ? "selected" : "",
         ].join(" ");
         return html`<g key=${lap.lap_number} className=${cls} onClick=${(e) => onPick(lap.lap_number, e.shiftKey)}>
-          <title>Lap ${lap.lap_number}: ${fmtLap(lap.lap_time_s)}</title>
+          <title>Lap ${lap.lap_number}: ${fmtLap(lap.lap_time_s)}${offTracks(lap) ? " · " + offTrackTitle(lap) : ""}</title>
           <circle cx=${x(i)} cy=${y(lap.lap_time_s)} r="5" />
+          ${offTracks(lap) ? html`<text className="off-pt" x=${x(i)} y=${y(lap.lap_time_s) - 11}>!</text>` : null}
           ${i % labelEvery === 0 ? html`<text x=${x(i)} y=${H - 6}>${lap.lap_number}</text>` : null}
         </g>`;
       })}
@@ -581,9 +714,17 @@
       const apex = idxOf(seg.pct, n);
       let minSel = Infinity;
       let minRef = Infinity;
+      let gearSel = null;
+      let gearRef = null;
       for (let j = a; j <= b; j++) {
-        minSel = Math.min(minSel, sel.speed_kph[j]);
-        if (ref) minRef = Math.min(minRef, ref.speed_kph[j]);
+        if (sel.speed_kph[j] < minSel) {
+          minSel = sel.speed_kph[j];
+          gearSel = sel.gear[j];
+        }
+        if (ref && ref.speed_kph[j] < minRef) {
+          minRef = ref.speed_kph[j];
+          gearRef = ref.gear[j];
+        }
       }
       const timeSel = sel.time_s[b] - sel.time_s[a];
       const timeRef = ref ? ref.time_s[b] - ref.time_s[a] : null;
@@ -600,6 +741,8 @@
         absSel: hSel.abs,
         minSel,
         minRef: ref ? minRef : null,
+        gearSel,
+        gearRef,
         delta: ref ? timeSel - timeRef : null,
         // Positive = the selected lap braked later (closer to the corner).
         brakeLaterM: bpSel !== null && bpRef !== null ? ((bpSel - bpRef) / n) * lengthM : null,
@@ -619,10 +762,33 @@
     [255, 181, 71],
     [61, 220, 132],
   ];
+  // Low → high ground: deep blue, teal, sand, white.
+  const ELEV_STOPS = [
+    [52, 84, 209],
+    [45, 180, 190],
+    [226, 200, 120],
+    [245, 245, 240],
+  ];
+  const GEAR_COLORS = ["#6b7486", "#ff5f5f", "#ff9f43", "#e8c547", "#3ddc84", "#4cc2ff", "#8f7bff", "#e67bff", "#ffffff"];
+  const gearColor = (g) => GEAR_COLORS[Math.max(0, Math.min(GEAR_COLORS.length - 1, g || 0))];
 
   // ---------- Track map ----------
 
-  function TrackMapView({ map, sel, refTrace: ref, mode, cursorPct, onHover, activeTurn, onTurnClick }) {
+  /** Where the comparison lap was when the analysed lap reached `pct`, as a lap fraction. */
+  function ghostPct(sel, ref, pct) {
+    const n = sel.time_s.length - 1;
+    const t = sel.time_s[idxOf(pct, n)];
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ref.time_s[mid] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo / n;
+  }
+
+  function TrackMapView({ map, sel, refTrace: ref, mode, cursorPct, onHover, activeTurn, onTurnClick, selOff, refOff }) {
     const svgRef = useRef(null);
     const points = map.points;
     const n = points.length - 1;
@@ -663,6 +829,9 @@
       }
       const vMin = Math.min(...sel.speed_kph);
       const vMax = Math.max(...sel.speed_kph);
+      const alt = sel.alt_m && sel.alt_m.length ? sel.alt_m : null;
+      const aMin = alt ? Math.min(...alt) : 0;
+      const aMax = alt ? Math.max(...alt) : 1;
       let c = 0;
       for (let k = 0; k < n; k += chunk, c++) {
         const e = Math.min(n, k + chunk);
@@ -681,6 +850,10 @@
           for (let j = k; j <= e; j++) v += sel.speed_kph[j];
           v /= e - k + 1;
           color = lerpColor(SPEED_STOPS, (v - vMin) / Math.max(1, vMax - vMin));
+        } else if (mode === "gear") {
+          color = gearColor(sel.gear[Math.round((k + e) / 2)]);
+        } else if (mode === "elevation" && alt) {
+          color = lerpColor(ELEV_STOPS, (alt[Math.round((k + e) / 2)] - aMin) / Math.max(0.5, aMax - aMin));
         } else {
           let thr = 0;
           let brk = 0;
@@ -749,6 +922,16 @@
     }
 
     const cursor = isNum(cursorPct) ? points[idxOf(cursorPct, n)] : null;
+    const ghost = cursor && sel && ref ? points[idxOf(ghostPct(sel, ref, cursorPct), n)] : null;
+    const offMarks = (pcts, cls) =>
+      (pcts || []).map((pct, i) => {
+        const p = points[idxOf(pct, n)];
+        return html`<g key=${cls + i} className=${"off-marker " + cls} transform=${`translate(${p[0]} ${-p[1]})`}>
+          <title>${cls === "sel" ? "Analysed" : "Comparison"} lap went off track here</title>
+          <path d=${`M0,${-9 * s}L${8 * s},${6 * s}H${-8 * s}Z`} />
+          <text fontSize=${9 * s} dy=${4 * s}>!</text>
+        </g>`;
+      });
     const activeSeg = activeTurn !== null && activeTurn !== undefined ? turnSegments(map.turns)[activeTurn] : null;
     const activePath = activeSeg
       ? (() => {
@@ -772,11 +955,14 @@
           transform=${`translate(${b.x} ${b.y})`}
           onClick=${() => onTurnClick(b.i)}
         >
-          <title>Turn ${b.label}</title>
+          <title>Turn ${b.label}: click for an entry and exit breakdown</title>
           <circle r=${9 * s} />
           <text fontSize=${(b.label.length > 2 ? 7.5 : 9.5) * s} dy=${3.3 * s}>${b.label}</text>
         </g>`
       )}
+      ${offMarks(refOff, "ref")}
+      ${offMarks(selOff, "sel")}
+      ${ghost ? html`<circle cx=${ghost[0]} cy=${-ghost[1]} r=${6 * s} className="map-cursor ghost" />` : null}
       ${cursor ? html`<circle cx=${cursor[0]} cy=${-cursor[1]} r=${6 * s} className="map-cursor" />` : null}
     </svg>`;
   }
@@ -808,6 +994,7 @@
             <th className="l bar-col"></th>
             <th>Min kph</th>
             ${hasRef ? html`<th>vs ref</th><th>Brake</th>` : null}
+            <th title="Gear at the slowest point (the comparison lap's in brackets when it differs)">Gear</th>
             ${hasGrip ? html`<th title="Average grip used while braking and cornering, as % of the session's peak">Grip</th>` : null}
             ${hasBal ? html`<th title="Mid-corner steering beyond what the car's rotation needed. + understeer, − oversteer. Compare laps, not corners.">Balance</th>` : null}
             ${hasAbs ? html`<th title="Share of braking with ABS active">ABS</th>` : null}
@@ -851,6 +1038,10 @@
                       ${isNum(c.brakeLaterM) ? (Math.abs(c.brakeLaterM) < 3 ? "same" : `${Math.abs(c.brakeLaterM).toFixed(0)} m ${c.brakeLaterM > 0 ? "later" : "earlier"}`) : "—"}
                     </td>`
                 : null}
+              <td>
+                ${c.gearSel ? html`<span className="gear-badge sm" style=${{ background: gearColor(c.gearSel) }}>${c.gearSel}</span>` : "—"}
+                ${hasRef && c.gearRef && c.gearRef !== c.gearSel ? html`<span className="bal-ref"> (${c.gearRef})</span>` : null}
+              </td>
               ${hasGrip
                 ? html`<td className=${isNum(c.gripRef) ? (c.gripSel - c.gripRef >= 3 ? "good" : c.gripSel - c.gripRef <= -3 ? "bad" : "") : ""} title=${cmp(c.gripSel, c.gripRef, 0, "%")}>
                     ${isNum(c.gripSel) ? `${c.gripSel.toFixed(0)}%` : "—"}
@@ -877,13 +1068,17 @@
     { key: "throttle", label: "Throttle", unit: "%", h: 64, fixed: [0, 100] },
     { key: "brake", label: "Brake", unit: "%", h: 64, fixed: [0, 100] },
     { key: "gear", label: "Gear", h: 56, step: true },
+    { key: "rpm", label: "RPM", h: 72, digits: 0 },
     { key: "steer_deg", label: "Steering", unit: "°", h: 72, symmetric: true },
     { key: "lat_g", label: "Lateral g", unit: "g", h: 64, symmetric: true, minSpan: 0.5, digits: 2 },
     { key: "long_g", label: "Long g", unit: "g", h: 64, symmetric: true, minSpan: 0.5, digits: 2 },
     { key: "balance_deg", label: "Balance · + under / − over", unit: "°", h: 72, symmetric: true, signed: true },
+    { key: "alt_rel", src: "alt_m", label: "Elevation", unit: "m", h: 56, digits: 1 },
   ];
 
-  function TraceChart({ sel, refTrace: ref, lengthM, turns, sectorPcts, cursorPct, onCursor, view, setView }) {
+  const VERDICT_LABEL = { early: "early", late: "late", on_time: "on time", part_throttle: "part throttle", unknown: "" };
+
+  function TraceChart({ sel, refTrace: ref, lengthM, turns, sectorPcts, cursorPct, onCursor, view, setView, shiftRpm, upshifts }) {
     const [wrapRef, width] = useElementWidth();
     const [drag, setDrag] = useState(null);
     const n = sel.time_s.length - 1;
@@ -897,10 +1092,22 @@
     const x = (j) => pad.l + ((j / n - r0) / (r1 - r0)) * plotW;
 
     const delta = useMemo(() => (ref ? sel.time_s.map((t, j) => t - ref.time_s[j]) : null), [sel, ref]);
-    const channel = (trace, key) => (key === "delta" ? (trace === sel ? delta : null) : trace && trace[key]);
+    // Elevation relative to the lowest point of the analysed lap, for both laps.
+    const altRel = useMemo(() => {
+      if (!sel.alt_m || !sel.alt_m.length) return null;
+      const base = Math.min(...sel.alt_m);
+      const rel = (t) => (t && t.alt_m && t.alt_m.length ? t.alt_m.map((v) => v - base) : null);
+      return { sel: rel(sel), ref: rel(ref) };
+    }, [sel, ref]);
+    const channel = (trace, key) => {
+      if (!trace) return null;
+      if (key === "delta") return trace === sel ? delta : null;
+      if (key === "alt_rel") return altRel ? (trace === sel ? altRel.sel : altRel.ref) : null;
+      return trace[key];
+    };
 
     let y = pad.top;
-    const layout = PANELS.filter((p) => p.key === "delta" || (sel[p.key] && sel[p.key].length)).map((p) => {
+    const layout = PANELS.filter((p) => p.key === "delta" || (sel[p.src || p.key] && sel[p.src || p.key].length)).map((p) => {
       const top = y;
       y += p.h + pad.gap;
       return { ...p, top };
@@ -916,6 +1123,7 @@
         for (let j = i0; j <= i1; j += step) values.push(arr[j]);
       }
       if (!values.length) return [-1, 1];
+      if (p.key === "rpm" && isNum(shiftRpm)) values.push(shiftRpm);
       let lo = Math.min(...values);
       let hi = Math.max(...values);
       if (p.key === "delta" || p.symmetric) {
@@ -970,7 +1178,7 @@
       if (p.key === "delta") return fmtDelta(v);
       if (p.key === "gear") return v === 0 ? "N" : v < 0 ? "R" : String(v);
       if (p.signed) return fmtSigned(v, 0) + p.unit;
-      return v.toFixed(p.digits || 0) + (p.unit === "%" || p.unit === "g" ? p.unit : "");
+      return v.toFixed(p.digits || 0) + (p.unit === "%" || p.unit === "g" || p.unit === "m" ? p.unit : "");
     };
 
     return html`<div ref=${wrapRef} className="trace-wrap">
@@ -1040,10 +1248,30 @@
                   <//>`
                 : null}
               ${p.key === "brake" && sel.abs && sel.abs.length ? html`<path className="abs-marks" d=${absMarks(sel.abs, p)} />` : null}
+              ${p.key === "rpm" && isNum(shiftRpm)
+                ? html`<line className="shift-line" x1=${pad.l} x2=${pad.l + plotW} y1=${yv(shiftRpm)} y2=${yv(shiftRpm)}><title>Shift light ${shiftRpm.toFixed(0)} rpm</title></line>`
+                : null}
               ${refArr ? html`<path className="trace-line ref" d=${line(refArr, p, dom, p.step)} />` : null}
               ${selArr && p.key !== "delta" ? html`<path className="trace-line sel" d=${line(selArr, p, dom, p.step)} />` : null}
+              ${p.key === "rpm"
+                ? (upshifts || [])
+                    .filter((s) => s.pct >= r0 && s.pct <= r1)
+                    .map(
+                      (s, i) => html`<circle key=${i} className=${"shift-pt " + s.verdict} cx=${x(s.pct * n)} cy=${yv(s.rpm)} r="4">
+                        <title>${s.from}→${s.to} at ${s.rpm.toFixed(0)} rpm${VERDICT_LABEL[s.verdict] ? " · " + VERDICT_LABEL[s.verdict] : ""}</title>
+                      </circle>`
+                    )
+                : null}
             </g>
-            <text className="panel-label" x=${pad.l + 6} y=${p.top + 13}>${p.key === "brake" && sel.abs && sel.abs.length ? "Brake · ABS marked" : p.label}</text>
+            <text className="panel-label" x=${pad.l + 6} y=${p.top + 13}>
+              ${p.key === "brake" && sel.abs && sel.abs.length
+                ? "Brake · ABS marked"
+                : p.key === "rpm" && isNum(shiftRpm)
+                  ? "RPM · dashed = shift light · dots = upshifts"
+                  : p.key === "alt_rel"
+                    ? "Elevation · metres above the lowest point"
+                    : p.label}
+            </text>
             ${cursorIdx !== null
               ? html`<text className="panel-readout" x=${pad.l + plotW - 6} y=${p.top + 13}>
                   ${p.key === "delta"
@@ -1078,12 +1306,53 @@
   // ---------- Grip circle ----------
 
   /**
+   * How a lap used the tyres over the samples in [i0, i1]: `used` = average combined g while
+   * braking or cornering, as % of the session peak; `limit` = share of that time spent at 85%+
+   * of the peak; `trail` = share of braking done while also turning (trail braking).
+   */
+  function gripStats(t, i0, i1, peakG) {
+    if (!t || !t.lat_g || !t.lat_g.length || !isNum(peakG)) return null;
+    let working = 0;
+    let sum = 0;
+    let near = 0;
+    let braking = 0;
+    let trail = 0;
+    for (let j = i0; j <= i1; j++) {
+      const lat = Math.abs(t.lat_g[j]);
+      const combined = Math.hypot(t.lat_g[j], t.long_g[j]);
+      const isBraking = t.brake[j] >= 5;
+      if (isBraking) {
+        braking++;
+        if (lat >= 0.35 * peakG) trail++;
+      }
+      if (isBraking || lat > 0.3 * peakG) {
+        working++;
+        sum += combined;
+        if (combined >= 0.85 * peakG) near++;
+      }
+    }
+    if (!working) return null;
+    return {
+      used: (sum / working / peakG) * 100,
+      limit: (near / working) * 100,
+      trail: braking ? (trail / braking) * 100 : null,
+    };
+  }
+
+  const GRIP_ROWS = [
+    ["Grip used", "used", "Average force while braking or cornering, as % of the dashed ring. Higher = using more of what the tyres can give."],
+    ["Time at the limit", "limit", "Share of braking and cornering spent at 85%+ of the ring. That's where lap time is: more is quicker, as long as the car stays tidy."],
+    ["Trail braking", "trail", "Share of braking done while already turning in: dots in the lower diagonals. Some is good; it keeps the front loaded for turn-in."],
+  ];
+
+  /**
    * Friction circle (g-g plot) for the part of the lap in view: every point is one sample of
    * lateral vs longitudinal g. A lap that fills the circle out to the session peak, including
    * the diagonals (trail braking into the corner, throttle on the way out), is using the grip.
    */
   function GripCircle({ sel, refTrace: ref, view, peakG, cursorPct, onCursor, selected, refNumber }) {
     const svgRef = useRef(null);
+    const [help, setHelp] = useState(() => stored("pcc.gripHelpOpen", "no") === "yes");
     const n = sel.time_s.length - 1;
     const i0 = Math.max(0, Math.floor(view[0] * n));
     const i1 = Math.min(n, Math.ceil(view[1] * n));
@@ -1131,10 +1400,33 @@
     const ci = isNum(cursorPct) ? idxOf(cursorPct, n) : null;
     const cur = ci !== null ? { lat: sel.lat_g[ci], long: sel.long_g[ci] } : null;
     const curRef = ci !== null && ref ? { lat: ref.lat_g[ci], long: ref.long_g[ci] } : null;
-    const pctOfPeak = (p) => (isNum(peakG) ? ` · ${((Math.hypot(p.lat, p.long) / peakG) * 100).toFixed(0)}% of peak` : "");
+    const pctOfPeak = (p) => (isNum(peakG) ? ` · ${((Math.hypot(p.lat, p.long) / peakG) * 100).toFixed(0)}% of the ring` : "");
+    const statsSel = gripStats(sel, i0, i1, peakG);
+    const statsRef = gripStats(ref, i0, i1, peakG);
+    const zoomed = view[0] > 0 || view[1] < 1;
+    // Quadrant labels sit on the diagonals, inside the plot.
+    const d45 = (c - 18) * 0.78 * Math.SQRT1_2;
 
     return html`<div className="grip-circle">
-      <div className="section-label">Grip circle</div>
+      <div className="section-label">
+        <span>Grip circle · ${zoomed ? "zoomed section" : "whole lap"}</span>
+        <button
+          className=${"btn btn-sm help-btn" + (help ? " on" : "")}
+          aria-expanded=${help}
+          onClick=${() => {
+            setHelp(!help);
+            store("pcc.gripHelpOpen", help ? "no" : "yes");
+          }}
+        >${help ? html`<span aria-hidden="true">✕</span> Hide help` : html`<span className="help-icon" aria-hidden="true">?</span> How to read this`}</button>
+      </div>
+      ${help
+        ? html`<div className="grip-help">
+            <p>Every dot is one moment of the lap, placed by the force on the car: <b>left/right</b> is cornering, <b>up</b> is accelerating, <b>down</b> is braking.</p>
+            <p>The <b>dashed ring</b> is the most grip you used all session, roughly what the tyres can give. The further the dots reach toward it, the more grip you're using.</p>
+            <p>A <b>"+" shape</b> means you brake, then turn, then accelerate as separate steps. Dots filling the <b>diagonals</b> mean you blend them: trail braking into the corner (lower corners) and feeding in throttle while still turning (upper corners). That's usually quicker.</p>
+            <p>Compare with the <span className="ref-text">orange</span> lap: where it reaches further out, that lap used more grip. Click a turn to see just that corner.</p>
+          </div>`
+        : null}
       <svg ref=${svgRef} viewBox=${`0 0 ${size} ${size}`} role="img" aria-label="Lateral versus longitudinal g" onMouseMove=${onMove} onMouseLeave=${() => onCursor(null)}>
         <line className="gg-axis" x1=${px(-extent)} x2=${px(extent)} y1=${c} y2=${c} />
         <line className="gg-axis" x1=${c} x2=${c} y1=${py(extent)} y2=${py(-extent)} />
@@ -1143,8 +1435,14 @@
           <text className="gg-tick" x=${c + 3} y=${py(g) - 3}>${g}g</text>
         </g>`)}
         ${isNum(peakG) ? html`<circle className="gg-peak" cx=${c} cy=${c} r=${peakG * r}><title>Session peak ${peakG.toFixed(2)} g</title></circle>` : null}
-        <text className="gg-edge" x=${c} y=${10}>Accel</text>
-        <text className="gg-edge" x=${c} y=${size - 3}>Brake</text>
+        <text className="gg-edge" x=${c} y=${10}>Accelerating</text>
+        <text className="gg-edge" x=${c} y=${size - 3}>Braking</text>
+        <text className="gg-edge" x=${4} y=${c - 4} textAnchor="start">Left</text>
+        <text className="gg-edge" x=${size - 4} y=${c - 4} textAnchor="end">Right</text>
+        <text className="gg-quad" x=${c - d45} y=${c + d45}>trail brake</text>
+        <text className="gg-quad" x=${c + d45} y=${c + d45}>trail brake</text>
+        <text className="gg-quad" x=${c - d45} y=${c - d45}>power out</text>
+        <text className="gg-quad" x=${c + d45} y=${c - d45}>power out</text>
         ${ref && ref.lat_g ? html`<path className="gg-dots ref" d=${dots(ref)} />` : null}
         <path className="gg-dots sel" d=${dots(sel)} />
         ${curRef ? html`<circle className="gg-cursor ref" cx=${px(curRef.lat)} cy=${py(curRef.long)} r="4.5" />` : null}
@@ -1154,15 +1452,354 @@
         ${cur
           ? html`<div><span className="sel-fill">Lap ${selected}</span> ${fmtSigned(cur.lat, 2)} lat ${fmtSigned(cur.long, 2)} long${pctOfPeak(cur)}</div>
               ${curRef ? html`<div><span className="ref-fill">Lap ${refNumber}</span> ${fmtSigned(curRef.lat, 2)} lat ${fmtSigned(curRef.long, 2)} long${pctOfPeak(curRef)}</div>` : null}`
-          : html`<div className="faint">${view[0] > 0 || view[1] < 1 ? "Showing the zoomed section" : "Showing the whole lap"} · hover for values</div>`}
+          : html`<div className="faint">Hover the map, the traces or the dots for values</div>`}
       </div>
-      <p className="faint gg-note">The dashed ring is the session's peak grip. Points filling toward it, including the diagonals (trail braking in, throttle out), mean the tyres are being used.</p>
+      ${statsSel
+        ? html`<table className="grip-stats">
+            <thead>
+              <tr><th></th><th><span className="dot sel-bg"></span>Lap ${selected}</th>${statsRef ? html`<th><span className="dot ref-bg"></span>Lap ${refNumber}</th>` : null}</tr>
+            </thead>
+            <tbody>
+              ${GRIP_ROWS.map(([label, key, hint]) => {
+                const a = statsSel[key];
+                const b = statsRef ? statsRef[key] : null;
+                const cls = isNum(a) && isNum(b) && Math.abs(a - b) >= 3 ? (a > b ? "good" : "bad") : "";
+                return html`<tr key=${key} title=${hint}>
+                  <td>${label} <span className="info-dot">?</span></td>
+                  <td className=${"mono " + cls}>${isNum(a) ? a.toFixed(0) + "%" : "—"}</td>
+                  ${statsRef ? html`<td className="mono faint">${isNum(b) ? b.toFixed(0) + "%" : "—"}</td>` : null}
+                </tr>`;
+              })}
+            </tbody>
+          </table>`
+        : null}
     </div>`;
+  }
+
+  // ---------- Corner coach ----------
+
+  const ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
+
+  /** Rows of the numbers table: [label, key, unit, digits, which way is better (+1 higher, −1 lower, 0 neither), hint]. */
+  const CORNER_ROWS = [
+    ["Speed at braking", "entry_speed_kph", " kph", 0, 1, "Where braking starts. Mostly set by the exit of the corner before."],
+    ["Brake point", "brake_point_m", " m", 0, 0, "Metres before the apex where braking starts. Smaller = later."],
+    ["Minimum speed", "min_speed_kph", " kph", 0, 1, ""],
+    ["Throttle pickup", "throttle_on_m", " m", 0, -1, "Metres after the apex where the throttle reaches 20% (negative = before the apex)."],
+    ["Full throttle", "full_throttle_m", " m", 0, -1, "Metres after the apex to full throttle."],
+    ["Exit speed", "exit_speed_kph", " kph", 0, 1, "Speed where the corner hands over to the next straight."],
+    ["Coasting", "coast_m", " m", 0, -1, "Distance with neither pedal pressed."],
+    ["Gear at apex", "apex_gear", "", 0, 0, "Gear at the slowest point of the corner."],
+    ["ABS", "abs_pct", "%", 0, -1, "Share of braking with ABS active."],
+    ["Entry balance", "entry_balance_deg", "°", 1, 0, "+ understeer, − oversteer (degrees of extra steering lock)."],
+    ["Exit balance", "exit_balance_deg", "°", 1, 0, "+ understeer, − oversteer."],
+  ];
+
+  function GradeChip({ label, pct }) {
+    const dir = pct >= 1 ? "uphill" : pct <= -1 ? "downhill" : "flat";
+    return html`<span className=${"chip grade " + dir} title="Average gradient over ~150 m">
+      ${label} ${dir === "flat" ? "flat" : html`${dir === "uphill" ? "↗" : "↘"} ${dir} ${Math.abs(pct).toFixed(0)}%`}
+    </span>`;
+  }
+
+  function PhaseColumn({ title, dt, rank, notes, vs }) {
+    return html`<div className="phase">
+      <div className="phase-head">
+        <span className="section-label">${title}</span>
+        <span className=${"delta-chip " + deltaClass(dt)} title=${`Time through the ${title.toLowerCase()} vs ${vs}`}>${fmtDelta(dt)}</span>
+      </div>
+      ${rank
+        ? html`<div className="faint phase-rank">
+            ${rank.rank === 1 ? "Quickest" : ordinal(rank.rank) + " quickest"} of ${rank.of} laps${rank.rank > 1 ? ` · best is lap ${rank.best_lap}` : ""}
+          </div>`
+        : null}
+      ${notes.went_well.length ? html`<ul className="note-list good">${notes.went_well.map((t, i) => html`<li key=${i}>${t}</li>`)}</ul>` : null}
+      ${notes.to_work_on.length ? html`<ul className="note-list bad">${notes.to_work_on.map((t, i) => html`<li key=${i}>${t}</li>`)}</ul>` : null}
+    </div>`;
+  }
+
+  /**
+   * Entry/exit breakdown of one corner: the analysed lap against the comparison lap, or against
+   * the driver's typical lap (median of the other counted laps), with optional coach advice.
+   */
+  function CornerCoach({ split, turnIndex, turnLabel, selected, refNumber, excluded, model, offHere, onClose }) {
+    const hasRef = refNumber !== null && refNumber !== selected;
+    const [mode, setMode] = useState(() => stored("pcc.cornerMode", "ref"));
+    const vsRef = mode === "ref" && hasRef;
+    const [report, setReport] = useState(null);
+    const [error, setError] = useState(null);
+    const [coach, setCoach] = useState({ loading: false, text: null, error: null });
+    const excludedKey = [...excluded].sort((a, b) => a - b).join(",");
+
+    const body = (withCoach) =>
+      JSON.stringify({
+        lap: selected,
+        ref_lap: vsRef ? refNumber : null,
+        exclude: excludedKey ? excludedKey.split(",").map(Number) : [],
+        coach: withCoach,
+        model: model || null,
+      });
+
+    useEffect(() => {
+      let cancelled = false;
+      setError(null);
+      setCoach({ loading: false, text: null, error: null });
+      api(`/api/splits/${split.id}/corners/${turnIndex}`, { method: "POST", body: body(false) })
+        .then((r) => !cancelled && setReport(r.report))
+        .catch((err) => {
+          if (cancelled) return;
+          setReport(null);
+          setError(err.message);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [split.id, turnIndex, selected, refNumber, vsRef, excludedKey]);
+
+    async function askCoach() {
+      setCoach({ loading: true, text: null, error: null });
+      try {
+        const r = await api(`/api/splits/${split.id}/corners/${turnIndex}`, { method: "POST", body: body(true) });
+        setCoach({ loading: false, text: r.feedback, error: null, model: r.model });
+      } catch (err) {
+        setCoach({ loading: false, text: null, error: err.message });
+      }
+    }
+
+    const vs = report ? report.baseline_label : vsRef ? `lap ${refNumber}` : "your typical lap";
+    const stale = report && (report.lap !== selected || (report.ref_lap ?? null) !== (vsRef ? refNumber : null));
+
+    return html`<div className="corner-coach">
+      <div className="corner-coach-head">
+        <div>
+          <div className="corner-coach-title">
+            <span className="turn-pill big">${turnLabel}</span>
+            <span>Turn ${turnLabel}</span>
+            <span className="lap-vs">
+              <span className="dot sel-bg"></span>Lap ${selected}
+              <span className="faint">vs</span>
+              ${vsRef ? html`<span className="dot ref-bg"></span>Lap ${refNumber}` : html`<span>typical lap${report ? ` (median of ${report.field_size})` : ""}</span>`}
+            </span>
+          </div>
+          ${offHere ? html`<div className="bad corner-off"><span className="off-mark">!</span> Lap ${selected} went off track in this corner.</div>` : null}
+        </div>
+        <div className="head-actions">
+          <${Segmented}
+            label="Compare corner with"
+            value=${vsRef ? "ref" : "field"}
+            onChange=${(m) => {
+              setMode(m);
+              store("pcc.cornerMode", m);
+            }}
+            options=${[
+              ...(hasRef ? [{ value: "ref", label: `vs lap ${refNumber}` }] : []),
+              { value: "field", label: "vs all my laps" },
+            ]}
+          />
+          <button className="btn btn-ghost btn-icon" onClick=${onClose} aria-label="Close corner breakdown" title="Close">✕</button>
+        </div>
+      </div>
+
+      ${error
+        ? html`<p className="muted">${error}</p>`
+        : !report
+          ? html`<p className="muted"><span className="spinner inline"></span>Comparing…</p>`
+          : html`<div className=${"corner-coach-body" + (stale ? " stale" : "")}>
+              <div className="phases">
+                <${PhaseColumn} title="Entry" dt=${report.sel.entry_time_s - report.base.entry_time_s} rank=${report.entry_rank} notes=${report.entry} vs=${vs} />
+                <${PhaseColumn} title="Exit" dt=${report.sel.exit_time_s - report.base.exit_time_s} rank=${report.exit_rank} notes=${report.exit} vs=${vs} />
+              </div>
+              <div className="corner-details">
+              <div className="corner-context">
+              ${report.terrain_notes.length || report.terrain
+                ? html`<div className="terrain">
+                    <div className="section-label">The road here</div>
+                    ${report.terrain
+                      ? html`<div className="terrain-chips">
+                          <${GradeChip} label="Braking zone" pct=${report.terrain.entry_grade_pct} />
+                          <span className="chip" title="Height of the apex compared with the road 40 m either side">
+                            Apex ${report.terrain.apex_crest_m >= 0.5 ? "on a crest" : report.terrain.apex_crest_m <= -0.5 ? "in a compression" : "flat"}
+                          </span>
+                          <${GradeChip} label="Exit" pct=${report.terrain.exit_grade_pct} />
+                        </div>`
+                      : null}
+                    ${report.terrain_notes.length ? html`<ul className="note-list neutral">${report.terrain_notes.map((t, i) => html`<li key=${i}>${t}</li>`)}</ul>` : null}
+                  </div>`
+                : null}
+              ${report.gear_options.length
+                ? html`<div className="gear-options">
+                    <div className="section-label">Gear at the apex, all counted laps</div>
+                    <div className="gear-option-row">
+                      ${(() => {
+                        const best = Math.min(...report.gear_options.map((g) => g.best_time_s));
+                        return report.gear_options.map(
+                          (g) => html`<div
+                            key=${g.gear}
+                            className=${"gear-option" + (g.gear === report.sel.apex_gear ? " mine" : "")}
+                            title=${`Laps ${g.laps.join(", ")} · best ${g.best_time_s.toFixed(2)}s, average ${g.avg_time_s.toFixed(2)}s through the corner`}
+                          >
+                            <span className="gear-badge" style=${{ background: gearColor(g.gear) }}>${g.gear}</span>
+                            <span>
+                              <b className="mono">${g.best_time_s - best < 0.0005 ? "quickest" : "+" + (g.best_time_s - best).toFixed(2) + "s"}</b>
+                              <span className="faint"> best pass · ${g.laps.length} lap${g.laps.length === 1 ? "" : "s"}${g.gear === report.sel.apex_gear ? " · this lap" : ""}</span>
+                            </span>
+                          </div>`
+                        );
+                      })()}
+                    </div>
+                  </div>`
+                : null}
+              </div>
+              <div className="corner-numbers">
+                <table className="corners compact">
+                  <thead>
+                    <tr><th className="l"></th><th><span className="dot sel-bg"></span>Lap ${report.lap}</th><th>${vsRef ? html`<span className="dot ref-bg"></span>Lap ${report.ref_lap}` : "Typical"}</th><th>Diff</th></tr>
+                  </thead>
+                  <tbody>
+                    ${CORNER_ROWS.filter(([, key]) => isNum(report.sel[key]) || isNum(report.base[key])).map(([label, key, unit, digits, better, hint]) => {
+                      const a = report.sel[key];
+                      const b = report.base[key];
+                      const d = isNum(a) && isNum(b) ? a - b : null;
+                      const threshold = unit === " kph" ? 1 : unit === " m" ? 3 : unit === "%" ? 5 : 1.5;
+                      const cls = d === null || !better || Math.abs(d) < threshold ? "faint" : d * better > 0 ? "good" : "bad";
+                      return html`<tr key=${key} title=${hint}>
+                        <td className="l">${label}</td>
+                        <td>${fmtNum(a, digits, unit)}</td>
+                        <td className="faint">${fmtNum(b, digits, unit)}</td>
+                        <td className=${cls}>${d === null ? "—" : fmtSigned(d, digits) + unit}</td>
+                      </tr>`;
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              </div>
+              <div className="coach-ask">
+                ${coach.text
+                  ? html`<div className="coach-text">
+                      <div className="section-label">Coach <span className="tag">${coach.model}</span></div>
+                      <p className="feedback">${coach.text}</p>
+                    </div>`
+                  : coach.error
+                    ? html`<p className="bad">${coach.error}</p>`
+                    : null}
+                <button className="btn btn-primary btn-sm" onClick=${askCoach} disabled=${coach.loading || stale}>
+                  ${coach.loading ? html`<span className="spinner"></span> Coach is thinking…` : coach.text ? "Ask again" : "Ask the coach about this corner"}
+                </button>
+              </div>
+            </div>`}
+    </div>`;
+  }
+
+  // ---------- Gears & shifts ----------
+
+  const fmtRpm = (v) => (isNum(v) ? Math.round(v).toLocaleString() : "—");
+
+  function afterTurn(turns, pct) {
+    const before = turns.filter((t) => t.pct <= pct);
+    return before.length ? `after T${before[before.length - 1].label}` : "after the start";
+  }
+
+  /** Upshift RPMs by gear against the shift light, the analysed lap's shifts, and the rev limiter. */
+  function ShiftsCard({ shifts, selected, turns, onJump }) {
+    const ref = shifts.reference_rpm;
+    const tol = shifts.tolerance_rpm;
+    const pairs = shifts.pairs;
+    const lo = Math.min(...pairs.map((p) => p.min_rpm), isNum(ref) ? ref - tol * 2 : Infinity) - 150;
+    const hi = Math.max(...pairs.map((p) => p.max_rpm), isNum(ref) ? ref + tol * 2 : -Infinity, isNum(shifts.redline_rpm) ? shifts.redline_rpm : -Infinity) + 150;
+    const pos = (v) => `${((v - lo) / (hi - lo)) * 100}%`;
+    const mine = shifts.upshifts.filter((s) => s.lap === selected);
+    const limiter = shifts.limiter.find((l) => l.lap === selected);
+
+    return html`<section className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Gears & shifts</div>
+          <div className="faint" style=${{ fontSize: "12px", marginTop: "2px" }}>
+            ${isNum(shifts.shift_rpm) ? `Shift light ${fmtRpm(shifts.shift_rpm)} rpm` : "No shift light in this file"}
+            ${isNum(shifts.redline_rpm) ? ` · redline ${fmtRpm(shifts.redline_rpm)} rpm` : ""}
+          </div>
+        </div>
+        <span className="legend">
+          <span><i className="shift-key early"></i>Early</span>
+          <span><i className="shift-key on_time"></i>On time</span>
+          <span><i className="shift-key late"></i>Late</span>
+          <span><i className="shift-key part_throttle"></i>Part throttle</span>
+        </span>
+      </div>
+      <p className="muted shift-explain">
+        Each upshift is judged by the peak RPM just before the change${ref ? html`, against ${shifts.reference_source} (${fmtRpm(ref)} rpm, ±${fmtRpm(tol)} counts as on time)` : ""}.
+        Changing up too early leaves the engine below its power band in the next gear; too late wastes time near or on the limiter.
+        Changes without full throttle (short-shifting for traction) aren't judged.
+      </p>
+      ${shifts.notes.length
+        ? html`<ul className=${"note-list " + (shifts.notes.some((n) => n.includes("sooner") || n.includes("longer") || n.includes("limiter")) ? "bad" : "good")}>
+            ${shifts.notes.map((t, i) => html`<li key=${i}>${t}</li>`)}
+          </ul>`
+        : null}
+      <div className="shift-layout">
+        <div className="shift-table-wrap">
+        <table className="corners shift-table">
+          <thead>
+            <tr>
+              <th className="l">Shift</th>
+              <th>Changes</th>
+              <th>Typical</th>
+              <th className="l rpm-col">RPM range, all counted laps</th>
+              <th>Early</th>
+              <th>Late</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pairs.map(
+              (p) => html`<tr key=${p.from}>
+                <td className="l"><span className="gear-badge sm" style=${{ background: gearColor(p.from) }}>${p.from}</span>→<span className="gear-badge sm" style=${{ background: gearColor(p.to) }}>${p.to}</span></td>
+                <td className="faint">${p.count}</td>
+                <td>${fmtRpm(p.median_rpm)}</td>
+                <td className="l rpm-col">
+                  <div className="rpm-range" title=${`${fmtRpm(p.min_rpm)}–${fmtRpm(p.max_rpm)} rpm`}>
+                    ${isNum(ref) ? html`<span className="rpm-window" style=${{ left: pos(ref - tol), width: `calc(${pos(ref + tol)} - ${pos(ref - tol)})` }}></span>` : null}
+                    ${isNum(shifts.redline_rpm) ? html`<span className="rpm-redline" style=${{ left: pos(shifts.redline_rpm) }}></span>` : null}
+                    <span className="rpm-span" style=${{ left: pos(p.min_rpm), width: `calc(${pos(p.max_rpm)} - ${pos(p.min_rpm)} + 2px)` }}></span>
+                    ${mine
+                      .filter((s) => s.from === p.from && s.verdict !== "part_throttle")
+                      .map((s, i) => html`<span key=${i} className=${"rpm-mine " + s.verdict} style=${{ left: pos(s.rpm) }} title=${`Lap ${selected}: ${fmtRpm(s.rpm)} rpm`}></span>`)}
+                  </div>
+                </td>
+                <td className=${p.early ? "bad" : "faint"}>${p.early}</td>
+                <td className=${p.late ? "bad" : "faint"}>${p.late}</td>
+              </tr>`
+            )}
+          </tbody>
+        </table>
+        </div>
+        <div className="shift-lap">
+          <div className="section-label">Lap ${selected}'s upshifts</div>
+          ${mine.length
+            ? html`<div className="shift-chips">
+                ${mine.map(
+                  (s, i) => html`<button key=${i} className=${"shift-chip " + s.verdict} onClick=${() => onJump(s.pct)} title="Show on the map and traces">
+                    <b>${s.from}→${s.to}</b> <span className="mono">${fmtRpm(s.rpm)}</span>
+                    <span className="faint">${afterTurn(turns, s.pct)}</span>
+                    ${VERDICT_LABEL[s.verdict] ? html`<span className="verdict">${VERDICT_LABEL[s.verdict]}</span>` : null}
+                  </button>`
+                )}
+              </div>`
+            : html`<p className="faint">No upshifts on this lap.</p>`}
+          ${limiter ? html`<p className=${limiter.metres >= 20 ? "bad" : "faint"} style=${{ fontSize: "12px", marginTop: "8px" }}>${limiter.metres.toFixed(0)} m on the rev limiter this lap.</p>` : null}
+          <p className="faint" style=${{ fontSize: "12px", marginTop: "8px" }}>Which gear is quicker through a corner: click the turn on the map. When your laps used different gears there, the breakdown compares them.</p>
+        </div>
+      </div>
+    </section>`;
   }
 
   // ---------- Track section ----------
 
-  function TrackSection({ split, laps, selected, refNumber, traceCache }) {
+  const scrollToAnalysis = () => {
+    const el = document.getElementById("track-analysis");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  function TrackSection({ split, laps, selected, refNumber, excluded, model, traceCache }) {
     const [map, setMap] = useState(null);
     const [mapError, setMapError] = useState(null);
     const [traces, setTraces] = useState({});
@@ -1204,6 +1841,18 @@
     const segments = useMemo(() => (map ? turnSegments(map.turns) : []), [map]);
     const corners = useMemo(() => (map && sel ? cornerStats(segments, sel, ref, map.length_m, split.peak_g) : []), [segments, sel, ref, split.peak_g]);
 
+    const [shifts, setShifts] = useState(null);
+    const excludedKey = [...excluded].sort((a, b) => a - b).join(",");
+    useEffect(() => {
+      let cancelled = false;
+      api(`/api/splits/${split.id}/shifts?exclude=${excludedKey}`)
+        .then((r) => !cancelled && setShifts(r))
+        .catch(() => !cancelled && setShifts(null));
+      return () => {
+        cancelled = true;
+      };
+    }, [split.id, excludedKey]);
+
     const selectTurn = (i) => {
       setActiveTurn(i);
       if (i === null) {
@@ -1238,90 +1887,149 @@
     const selLap = laps.find((l) => l.lap_number === selected);
     const refLap = laps.find((l) => l.lap_number === refNumber);
     const totalDelta = sel && ref ? sel.time_s[sel.time_s.length - 1] - ref.time_s[ref.time_s.length - 1] : null;
+    const activeSeg = activeTurn !== null ? segments[activeTurn] : null;
+    const offHere = !!(activeSeg && selLap && (selLap.off_track_pcts || []).some((p) => p >= activeSeg.start && p <= activeSeg.end));
+    const ghost = sel && ref && isNum(cursorPct) ? ghostPct(sel, ref, cursorPct) : null;
+    let ghostGap = null;
+    if (ghost !== null) {
+      // Wrap so a gap across the line reads as a small number, not a whole lap.
+      let g = ghost - cursorPct;
+      if (g > 0.5) g -= 1;
+      if (g < -0.5) g += 1;
+      ghostGap = g * map.length_m;
+    }
+
+    const hasAlt = !!(sel && sel.alt_m && sel.alt_m.length);
+    const modeOptions = [
+      { value: "delta", label: "Gain/loss" },
+      { value: "speed", label: "Speed" },
+      { value: "inputs", label: "Inputs" },
+      { value: "gear", label: "Gear" },
+      ...(hasAlt ? [{ value: "elevation", label: "Elevation" }] : []),
+    ];
+    const mapMode = modeOptions.some((o) => o.value === mode) ? mode : "delta";
+    const gearsUsed = sel ? [...new Set(sel.gear)].filter((g) => g > 0).sort((a, b) => a - b) : [];
+    const altRange = hasAlt ? Math.max(...sel.alt_m) - Math.min(...sel.alt_m) : 0;
+    const zoomed = view[0] > 0 || view[1] < 1;
+    const selShifts = shifts ? shifts.upshifts.filter((s) => s.lap === selected) : [];
 
     return html`<${React.Fragment}>
-      <section className="card">
+      <section className="card" id="track-analysis">
         <div className="card-head">
           <div>
-            <div className="card-title">Track</div>
+            <div className="card-title">Track & telemetry</div>
             <div className="lap-vs">
               <span className="dot sel-bg"></span>Lap ${selected} ${selLap ? html`<span className="mono">${fmtLap(selLap.lap_time_s)}</span>` : null}
+              <${OffTrackMark} lap=${selLap} />
               ${ref
                 ? html`<span className="faint">vs</span><span className="dot ref-bg"></span>Lap ${refNumber} <span className="mono">${fmtLap(refLap && refLap.lap_time_s)}</span>
+                    <${OffTrackMark} lap=${refLap} />
                     <span className=${"delta-chip " + deltaClass(totalDelta)}>${fmtDelta(totalDelta)}</span>`
-                : null}
+                : html`<span className="faint">· pick a lap to compare with in the lap bar</span>`}
             </div>
           </div>
           <div className="head-actions">
+            ${zoomed
+              ? html`<button className="btn btn-sm" onClick=${() => selectTurn(null)}>
+                  ${activeTurn !== null && map.turns[activeTurn] ? `Turn ${map.turns[activeTurn].label} · ` : ""}Show whole lap
+                </button>`
+              : null}
             <${Segmented}
               label="Map colouring"
-              value=${mode}
+              value=${mapMode}
               onChange=${(m) => {
                 setMode(m);
                 store("pcc.mapMode", m);
               }}
-              options=${[
-                { value: "delta", label: "Time gain/loss" },
-                { value: "speed", label: "Speed" },
-                { value: "inputs", label: "Inputs" },
-              ]}
+              options=${modeOptions}
             />
           </div>
         </div>
         ${!sel
           ? html`<p className="muted">Lap ${selected} wasn't a clean timed lap, so it has no telemetry trace. Pick another lap.</p>`
-          : html`<div className="track-grid">
-              <div className="map-col">
+          : html`<div className="analysis-grid">
+              <div className="analysis-side">
                 <${TrackMapView}
                   map=${map}
                   sel=${sel}
                   refTrace=${ref}
-                  mode=${mode}
+                  mode=${mapMode}
                   cursorPct=${cursorPct}
                   onHover=${setCursorPct}
                   activeTurn=${activeTurn}
                   onTurnClick=${(i) => selectTurn(activeTurn === i ? null : i)}
+                  selOff=${selLap && selLap.off_track_pcts}
+                  refOff=${ref && refLap ? refLap.off_track_pcts : null}
                 />
                 <div className="map-legend">
-                  ${mode === "delta"
+                  ${mapMode === "delta"
                     ? ref
-                      ? html`<span><i className="good-bg"></i>Lap ${selected} faster</span><span><i className="bad-bg"></i>Lap ${selected} slower</span>`
-                      : html`<span className="faint">Shift+click a lap to compare against</span>`
-                    : mode === "speed"
+                      ? html`<span><i className="good-bg"></i>Lap ${selected} gaining on lap ${refNumber}</span><span><i className="bad-bg"></i>losing</span>`
+                      : html`<span className="faint">Pick a lap to compare with in the lap bar above</span>`
+                    : mapMode === "speed"
                       ? html`<span className="speed-scale"></span><span className="faint">slow → fast</span>`
-                      : html`<span><i style=${{ background: "#ff5f5f" }}></i>Braking</span><span><i style=${{ background: "#e8c547" }}></i>Part throttle</span><span><i style=${{ background: "#3ddc84" }}></i>Full throttle</span><span><i style=${{ background: "#6b7486" }}></i>Coast</span>`}
+                      : mapMode === "gear"
+                        ? gearsUsed.map((g) => html`<span key=${g}><span className="gear-badge sm" style=${{ background: gearColor(g) }}>${g}</span></span>`)
+                        : mapMode === "elevation"
+                          ? html`<span className="elev-scale"></span><span className="faint">low → high · ${altRange.toFixed(0)} m range</span>`
+                          : html`<span><i style=${{ background: "#ff5f5f" }}></i>Braking</span><span><i style=${{ background: "#e8c547" }}></i>Part throttle</span><span><i style=${{ background: "#3ddc84" }}></i>Full throttle</span><span><i style=${{ background: "#6b7486" }}></i>Coast</span>`}
                 </div>
-                <p className="faint map-note">
-                  ${(map.source === "gps" ? "Map from GPS telemetry. " : "Map reconstructed from heading data. ") +
-                  "Turn numbers are auto-detected — rename them to match the official ones."}
-                </p>
+                <div className="map-legend map-hover">
+                  ${isNum(cursorPct)
+                    ? html`<span><i className="sel-bg round"></i>Lap ${selected}</span>
+                        ${ghostGap !== null
+                          ? html`<span><i className="ref-bg round"></i>Lap ${refNumber}:
+                              <b className=${Math.abs(ghostGap) < 1 ? "" : ghostGap > 0 ? "bad" : "good"}>
+                                ${Math.abs(ghostGap) < 1 ? " level" : ` ${Math.abs(ghostGap).toFixed(0)} m ${ghostGap > 0 ? "ahead" : "behind"}`}
+                              </b></span>`
+                          : null}`
+                    : html`<span className="faint">Hover the map or the traces · click a turn number to zoom in</span>`}
+                  ${(selLap && offTracks(selLap)) || (ref && offTracks(refLap)) ? html`<span><span className="off-mark">!</span>off track</span>` : null}
+                </div>
+                ${sel.lat_g && sel.lat_g.length
+                  ? html`<${GripCircle}
+                      sel=${sel}
+                      refTrace=${ref && ref.lat_g && ref.lat_g.length ? ref : null}
+                      view=${view}
+                      peakG=${split.peak_g}
+                      cursorPct=${cursorPct}
+                      onCursor=${setCursorPct}
+                      selected=${selected}
+                      refNumber=${refNumber}
+                    />`
+                  : null}
               </div>
-              <div className="corner-col">
-                <div className="corner-head">
-                  <span className="section-label">Corner by corner</span>
-                  ${editing
-                    ? html`<span className="head-actions">
-                        <button className="btn btn-ghost btn-sm" onClick=${() => setEditing(false)}>Cancel</button>
-                        <button className="btn btn-primary btn-sm" onClick=${saveLabels}>Save names</button>
-                      </span>`
-                    : html`<button
-                        className="btn btn-ghost btn-sm"
-                        onClick=${() => {
-                          setLabels(map.turns.map((t) => t.label));
-                          setEditing(true);
-                        }}
-                      >Rename turns</button>`}
-                </div>
-                <${CornerTable}
-                  corners=${corners}
-                  hasRef=${!!ref}
-                  activeTurn=${activeTurn}
-                  onSelectTurn=${selectTurn}
-                  editing=${editing}
-                  labels=${labels}
-                  setLabels=${setLabels}
+              <div className="analysis-main">
+                ${activeTurn !== null && map.turns[activeTurn]
+                  ? html`<${CornerCoach}
+                      key=${activeTurn}
+                      split=${split}
+                      turnIndex=${activeTurn}
+                      turnLabel=${map.turns[activeTurn].label}
+                      selected=${selected}
+                      refNumber=${ref ? refNumber : null}
+                      excluded=${excluded}
+                      model=${model}
+                      offHere=${offHere}
+                      onClose=${() => selectTurn(null)}
+                    />`
+                  : html`<div className="analysis-hint faint">
+                      The map, grip circle and traces are linked: hover any of them to see the same moment everywhere.
+                      Click a turn number on the map (or a row in the corner table) to zoom in on it and get an entry/exit breakdown.
+                    </div>`}
+                <${TraceChart}
+                  sel=${sel}
+                  refTrace=${ref}
+                  lengthM=${map.length_m}
+                  turns=${map.turns}
+                  sectorPcts=${map.sector_pcts || []}
+                  cursorPct=${cursorPct}
+                  onCursor=${setCursorPct}
+                  view=${view}
+                  setView=${setView}
+                  shiftRpm=${shifts ? shifts.reference_rpm : split.shift_rpm}
+                  upshifts=${selShifts}
                 />
-                ${!ref ? html`<p className="faint" style=${{ fontSize: "12px", marginTop: "8px" }}>Shift+click another lap to see where you gain and lose time.</p>` : null}
               </div>
             </div>`}
       </section>
@@ -1329,43 +2037,48 @@
       ${sel
         ? html`<section className="card">
             <div className="card-head">
-              <div className="card-title">Telemetry</div>
-              <div className="head-actions">
-                <span className="legend">
-                  <span><i className="sel-bg"></i>Lap ${selected}</span>
-                  ${ref ? html`<span><i className="ref-bg"></i>Lap ${refNumber}</span>` : null}
-                </span>
-                ${view[0] > 0 || view[1] < 1
-                  ? html`<button className="btn btn-ghost btn-sm" onClick=${() => selectTurn(null)}>Reset zoom</button>`
-                  : null}
-              </div>
+              <div className="card-title">Corner by corner</div>
+              ${editing
+                ? html`<span className="head-actions">
+                    <button className="btn btn-ghost btn-sm" onClick=${() => setEditing(false)}>Cancel</button>
+                    <button className="btn btn-primary btn-sm" onClick=${saveLabels}>Save names</button>
+                  </span>`
+                : html`<button
+                    className="btn btn-ghost btn-sm"
+                    onClick=${() => {
+                      setLabels(map.turns.map((t) => t.label));
+                      setEditing(true);
+                    }}
+                  >Rename turns</button>`}
             </div>
-            <div className=${sel.lat_g && sel.lat_g.length ? "telemetry-grid" : ""}>
-              <${TraceChart}
-                sel=${sel}
-                refTrace=${ref}
-                lengthM=${map.length_m}
-                turns=${map.turns}
-                sectorPcts=${map.sector_pcts || []}
-                cursorPct=${cursorPct}
-                onCursor=${setCursorPct}
-                view=${view}
-                setView=${setView}
-              />
-              ${sel.lat_g && sel.lat_g.length
-                ? html`<${GripCircle}
-                    sel=${sel}
-                    refTrace=${ref && ref.lat_g && ref.lat_g.length ? ref : null}
-                    view=${view}
-                    peakG=${split.peak_g}
-                    cursorPct=${cursorPct}
-                    onCursor=${setCursorPct}
-                    selected=${selected}
-                    refNumber=${refNumber}
-                  />`
-                : null}
-            </div>
+            <${CornerTable}
+              corners=${corners}
+              hasRef=${!!ref}
+              activeTurn=${activeTurn}
+              onSelectTurn=${(i) => {
+                selectTurn(i);
+                if (i !== null) scrollToAnalysis();
+              }}
+              editing=${editing}
+              labels=${labels}
+              setLabels=${setLabels}
+            />
+            <p className="faint map-note">
+              ${!ref ? "Pick a lap to compare with in the lap bar to see where you gain and lose time. " : ""}
+              ${(map.source === "gps" ? "Map from GPS telemetry. " : "Map reconstructed from heading data. ") +
+              "Turn numbers are auto-detected — rename them to match the official ones."}
+            </p>
           </section>`
+        : null}
+
+      ${shifts && shifts.upshifts.length
+        ? html`<${ShiftsCard} shifts=${shifts} selected=${selected} turns=${map.turns} onJump=${(pct) => {
+            const w = 0.04;
+            setActiveTurn(null);
+            setView([Math.max(0, pct - w), Math.min(1, pct + w)]);
+            setCursorPct(pct);
+            scrollToAnalysis();
+          }} />`
         : null}
     <//>`;
   }
@@ -1375,6 +2088,7 @@
   function LapTable({ laps, stats, excluded, selected, compare, onPick, onToggle }) {
     const nSectors = stats ? stats.nSectors : 0;
     const showTyres = laps.some((lap) => isNum(lap.tyre_temp_avg_c));
+    const showIncidents = laps.some((lap) => isNum(lap.incidents));
     const bestTime = stats ? stats.best.lap_time_s : null;
 
     return html`<div className="table-wrap">
@@ -1387,6 +2101,7 @@
             <th>Δ Best</th>
             ${range(nSectors).map((i) => html`<th key=${i}>S${i + 1}</th>`)}
             <th>Avg kph</th>
+            ${showIncidents ? html`<th title="Incident points picked up on the lap">Inc</th>` : null}
             ${showTyres ? html`<th>Tyre °C</th><th>Spread</th>` : null}
           </tr>
         </thead>
@@ -1414,6 +2129,7 @@
               <td className="l">
                 ${lap.lap_number} ${isBest ? html`<span className="tag tag-best">best</span>` : null}
                 ${!lap.is_complete ? html`<span className="tag tag-out">untimed</span>` : null}
+                <${OffTrackMark} lap=${lap} />
               </td>
               <td className=${isBest ? "time-best" : ""}>${fmtLap(lap.lap_time_s)}</td>
               <td className=${isBest ? "purple" : deltaClass(delta)}>${isBest ? "—" : fmtDelta(delta)}</td>
@@ -1423,6 +2139,7 @@
                 return html`<td key=${i} className=${isSectorBest ? "sector-best" : ""}>${fmtNum(v, 3)}</td>`;
               })}
               <td>${fmtNum(lap.avg_speed_kph, 1)}</td>
+              ${showIncidents ? html`<td className=${lap.incidents > 0 ? "bad" : "faint"}>${isNum(lap.incidents) ? (lap.incidents > 0 ? lap.incidents + "x" : "0") : "—"}</td>` : null}
               ${showTyres ? html`<td>${fmtNum(lap.tyre_temp_avg_c, 1)}</td><td>${fmtNum(lap.tyre_temp_delta_c, 1)}</td>` : null}
             </tr>`;
           })}
@@ -1445,13 +2162,12 @@
     </div>`;
   }
 
-  function LapDetail({ laps, insights, stats, selected, compare, refNumber, autoRef, setCompare }) {
+  function LapDetail({ laps, insights, stats, selected, compare, refNumber }) {
     const lap = laps.find((l) => l.lap_number === selected);
     if (!lap) {
       return html`<section className="card"><p className="muted">Pick a lap to see the breakdown.</p></section>`;
     }
     const ref = laps.find((l) => l.lap_number === refNumber);
-    const autoLap = laps.find((l) => l.lap_number === autoRef);
     const isSelf = ref && ref.lap_number === lap.lap_number;
     const delta = ref && lap.is_complete && ref.is_complete ? lap.lap_time_s - ref.lap_time_s : null;
     const insight = insights[lap.lap_number];
@@ -1473,7 +2189,7 @@
     return html`<section className="card detail">
       <div className="detail-hero">
         <div>
-          <div className="kpi-label">Lap ${lap.lap_number} ${!lap.is_complete ? "· untimed" : ""}</div>
+          <div className="kpi-label">Lap ${lap.lap_number} ${!lap.is_complete ? "· untimed" : ""} <${OffTrackMark} lap=${lap} /></div>
           <div className="detail-time">${fmtLap(lap.lap_time_s)}</div>
         </div>
         ${!isSelf && delta !== null
@@ -1483,25 +2199,13 @@
             : null}
       </div>
 
-      <div className="vs-row">
-        <span className="vs-dot" style=${{ background: "var(--compare)" }}></span>
-        <span className="muted" style=${{ fontSize: "13px" }}>vs</span>
-        <select
-          className="select"
-          value=${compare === null ? "best" : String(compare)}
-          onChange=${(e) => setCompare(e.target.value === "best" ? null : Number(e.target.value))}
-          aria-label="Compare against"
-        >
-          <option value="best">
-            ${autoLap
-              ? `${stats && autoLap.lap_number === stats.best.lap_number ? "Best" : "Next best"} (L${autoLap.lap_number} · ${fmtLap(autoLap.lap_time_s)})`
-              : "Best lap"}
-          </option>
-          ${laps
-            .filter((l) => l.is_complete)
-            .map((l) => html`<option key=${l.lap_number} value=${l.lap_number}>Lap ${l.lap_number} · ${fmtLap(l.lap_time_s)}</option>`)}
-        </select>
-      </div>
+      ${ref && !isSelf
+        ? html`<div className="vs-row muted">
+            <span className="vs-dot ref-bg"></span>
+            vs lap ${ref.lap_number} <span className="mono">${fmtLap(ref.lap_time_s)}</span>
+            <span className="faint">${compare === null ? (stats && ref.lap_number === stats.best.lap_number ? "· your best" : "· your next best") : ""}</span>
+          </div>`
+        : null}
 
       ${hasSectorDeltas
         ? html`<div className="sector-rows">
@@ -1549,7 +2253,7 @@
 
   // ---------- Run view ----------
 
-  function RunView({ split, laps }) {
+  function RunView({ split, laps, model }) {
     const [excluded, setExcluded] = useState(() => new Set());
     const [selected, setSelected] = useState(null);
     const [compare, setCompare] = useState(null);
@@ -1575,13 +2279,25 @@
     }, [stats, selected]);
     const refNumber = compare !== null ? compare : autoRef;
 
-    const pick = useCallback((lapNumber, asCompare) => {
-      if (asCompare) {
-        setCompare((current) => (current === lapNumber ? null : lapNumber));
-      } else {
+    // Picking the comparison lap as the analysed lap swaps them rather than comparing a lap with itself.
+    const selectLap = useCallback(
+      (lapNumber) => {
+        if (lapNumber === compare) setCompare(selected);
         setSelected(lapNumber);
-      }
-    }, []);
+      },
+      [compare, selected]
+    );
+
+    const pick = useCallback(
+      (lapNumber, asCompare) => {
+        if (asCompare) {
+          if (lapNumber !== selected) setCompare((current) => (current === lapNumber ? null : lapNumber));
+        } else {
+          selectLap(lapNumber);
+        }
+      },
+      [selected, selectLap]
+    );
 
     const toggle = useCallback((lapNumber) => {
       setExcluded((current) => {
@@ -1599,23 +2315,27 @@
         const idx = laps.findIndex((lap) => lap.lap_number === selected);
         if (e.key === "ArrowRight") {
           e.preventDefault();
-          if (idx < laps.length - 1) setSelected(laps[idx + 1].lap_number);
+          if (idx < laps.length - 1) selectLap(laps[idx + 1].lap_number);
         } else if (e.key === "ArrowLeft") {
           e.preventDefault();
-          if (idx > 0) setSelected(laps[idx - 1].lap_number);
+          if (idx > 0) selectLap(laps[idx - 1].lap_number);
         } else if ((e.key === "b" || e.key === "B") && stats) {
-          setSelected(stats.best.lap_number);
+          selectLap(stats.best.lap_number);
         }
       }
       window.addEventListener("keydown", onKey);
       return () => window.removeEventListener("keydown", onKey);
-    }, [laps, selected, stats]);
+    }, [laps, selected, stats, selectLap]);
 
     const subtitle = [
       split.car,
       fmtTimeOfDay(split.started_at_ms) + (split.source === "Live" ? " – " + fmtTimeOfDay(split.ended_at_ms) : ""),
       `${laps.filter((l) => l.is_complete).length} timed laps`,
       excluded.size ? `${excluded.size} excluded from stats` : null,
+      (() => {
+        const n = laps.filter((l) => offTracks(l)).length;
+        return n ? `${n} lap${n === 1 ? "" : "s"} with an off-track` : null;
+      })(),
     ]
       .filter(Boolean)
       .join(" · ");
@@ -1626,12 +2346,20 @@
           <h1>${runTitle(split)}</h1>
           <p>${subtitle}</p>
         </div>
-        <div className="legend">
-          <span><i style=${{ background: "var(--purple)" }}></i>Session best</span>
-          <span><i style=${{ background: "var(--accent)" }}></i>Selected</span>
-          <span><i style=${{ background: "var(--compare)" }}></i>Compare</span>
-        </div>
       </div>
+
+      <${LapBar}
+        laps=${laps}
+        stats=${stats}
+        excluded=${excluded}
+        selected=${selected}
+        compare=${compare}
+        refNumber=${refNumber}
+        autoRef=${autoRef}
+        setSelected=${selectLap}
+        setCompare=${setCompare}
+        onPick=${pick}
+      />
 
       ${stats
         ? html`<div className="kpis">
@@ -1675,36 +2403,26 @@
 
       <section className="card">
         <div className="card-head">
-          <div className="card-title">Pick a lap</div>
+          <div className="card-title">Pace</div>
           <div className="legend">
-            <span>Click to select · <span className="kbd">Shift</span>+click to compare</span>
-            <span><span className="kbd">←</span> <span className="kbd">→</span> step · <span className="kbd">B</span> best</span>
+            <span><i style=${{ background: "var(--purple)" }}></i>Session best</span>
+            <span><i className="sel-bg"></i>Analysing</span>
+            <span><i className="ref-bg"></i>Compared with</span>
+            <span><span className="off-mark">!</span>Off track</span>
           </div>
         </div>
-        <div className="lap-strip">
-          ${laps.map((lap) => {
-            const isBest = stats && lap.lap_number === stats.best.lap_number;
-            const d = stats && lap.is_complete ? lap.lap_time_s - stats.best.lap_time_s : null;
-            const cls = [
-              "lap-chip",
-              isBest ? "is-best" : "",
-              !lap.is_complete || excluded.has(lap.lap_number) ? "excluded" : "",
-              lap.lap_number === compare ? "compare" : "",
-              lap.lap_number === selected ? "selected" : "",
-            ].join(" ");
-            return html`<button key=${lap.lap_number} className=${cls} onClick=${(e) => pick(lap.lap_number, e.shiftKey)}>
-              <span className="n">LAP ${lap.lap_number}</span>
-              <span className="t">${fmtLap(lap.lap_time_s)}</span>
-              <span className=${"d " + (isBest ? "purple" : deltaClass(d))}>${isBest ? "best" : !lap.is_complete ? "untimed" : fmtDelta(d)}</span>
-            </button>`;
-          })}
-        </div>
-        <div style=${{ marginTop: "14px" }}>
-          <${PaceChart} laps=${laps} stats=${stats} excluded=${excluded} selected=${selected} compare=${compare} onPick=${pick} />
-        </div>
+        <${PaceChart} laps=${laps} stats=${stats} excluded=${excluded} selected=${selected} compare=${refNumber} onPick=${pick} />
       </section>
 
-      <${TrackSection} split=${split} laps=${laps} selected=${selected} refNumber=${refNumber} traceCache=${traceCache} />
+      <${TrackSection}
+        split=${split}
+        laps=${laps}
+        selected=${selected}
+        refNumber=${refNumber}
+        excluded=${excluded}
+        model=${model}
+        traceCache=${traceCache}
+      />
 
       <div className="split-2">
         <section className="card">
@@ -1712,18 +2430,9 @@
             <div className="card-title">Lap times</div>
             <span className="faint" style=${{ fontSize: "12px" }}>Untick out laps or spins to leave them out of the stats</span>
           </div>
-          <${LapTable} laps=${laps} stats=${stats} excluded=${excluded} selected=${selected} compare=${compare} onPick=${pick} onToggle=${toggle} />
+          <${LapTable} laps=${laps} stats=${stats} excluded=${excluded} selected=${selected} compare=${refNumber} onPick=${pick} onToggle=${toggle} />
         </section>
-        <${LapDetail}
-          laps=${laps}
-          insights=${insights}
-          stats=${stats}
-          selected=${selected}
-          compare=${compare}
-          refNumber=${refNumber}
-          autoRef=${autoRef}
-          setCompare=${setCompare}
-        />
+        <${LapDetail} laps=${laps} insights=${insights} stats=${stats} selected=${selected} compare=${compare} refNumber=${refNumber} />
       </div>
 
       <div className="coach">
@@ -1908,7 +2617,7 @@
         <main className="main">
           ${status.is_recording ? html`<${LivePanel} live=${live} />` : null}
           ${showRun
-            ? html`<${RunView} key=${split.id} split=${split} laps=${laps} />`
+            ? html`<${RunView} key=${split.id} split=${split} laps=${laps} model=${model} />`
             : splits.length === 0 && !status.is_recording
               ? html`<${EmptyState} onStart=${onStart} onOpen=${() => setImportOpen(true)} busy=${busy} />`
               : null}

@@ -19,7 +19,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     analysis::{add_corner_notes, summarize_session},
     handling::{corner_notes, peak_combined_g},
-    coach::generate_feedback,
+    coach::{ask_model, generate_feedback},
+    corner::{build_corner_prompt, corner_report, CornerReport},
+    gears::{shift_report, ShiftReport},
     ibt::read_ibt,
     io::{default_telemetry_dir, parse_csv_laps},
     live::{replay_until_stopped, run_live_telemetry_until_stopped, LiveCapture},
@@ -56,6 +58,8 @@ pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, 
             .route("/splits/:id/laps/:lap_number", get(get_split_lap))
             .route("/splits/:id/laps/:lap_number/trace", get(get_lap_trace))
             .route("/splits/:id/compare", get(compare_split_laps))
+            .route("/splits/:id/corners/:turn", post(analyze_corner))
+            .route("/splits/:id/shifts", get(get_shifts))
             .fallback(|| async {
                 error_response(StatusCode::NOT_FOUND, "API route not found.").into_response()
             });
@@ -110,6 +114,8 @@ struct PracticeSplit {
     laps: Vec<LapMetrics>,
     traces: Vec<LapTrace>,
     track: Option<TrackMap>,
+    shift_rpm: Option<f64>,
+    redline_rpm: Option<f64>,
     summary: SessionSummary,
     feedback: String,
 }
@@ -123,6 +129,8 @@ struct NewRun {
     laps: Vec<LapMetrics>,
     traces: Vec<LapTrace>,
     track: Option<TrackMap>,
+    shift_rpm: Option<f64>,
+    redline_rpm: Option<f64>,
 }
 
 impl NewRun {
@@ -144,6 +152,8 @@ impl NewRun {
             laps: run.laps,
             traces: run.traces,
             track,
+            shift_rpm: track_info.shift_rpm,
+            redline_rpm: track_info.redline_rpm,
         }
     }
 }
@@ -255,6 +265,9 @@ struct SplitDetailResponse {
     traced_laps: Vec<i32>,
     /// Session peak combined g (98th percentile over all traces), the 100% mark for grip use.
     peak_g: Option<f64>,
+    /// The car's shift-light RPM and redline, when the source records them.
+    shift_rpm: Option<f64>,
+    redline_rpm: Option<f64>,
     summary: SessionSummary,
     suggestions: Vec<String>,
     feedback: String,
@@ -270,6 +283,8 @@ struct LapInsight {
     avg_speed_kph: Option<f64>,
     tyre_temp_avg_c: Option<f64>,
     tyre_temp_delta_c: Option<f64>,
+    off_track_pcts: Vec<f64>,
+    incidents: Option<u32>,
     went_well: Vec<String>,
     went_bad: Vec<String>,
 }
@@ -330,6 +345,8 @@ fn split_detail(split: &PracticeSplit) -> SplitDetailResponse {
         has_track: split.track.is_some(),
         traced_laps: split.traces.iter().map(|trace| trace.lap_number).collect(),
         peak_g: peak_combined_g(&split.traces),
+        shift_rpm: split.shift_rpm,
+        redline_rpm: split.redline_rpm,
         summary: split.summary.clone(),
         suggestions: split.summary.suggestions.clone(),
         feedback: split.feedback.clone(),
@@ -379,6 +396,12 @@ fn build_lap_insight(lap: &LapMetrics, best_lap_time: f64, best_avg_speed: Optio
         }
     }
 
+    match lap.off_track_pcts.len() {
+        0 => {}
+        1 => went_bad.push("Went off track once: the time may not be representative.".to_string()),
+        n => went_bad.push(format!("Went off track {n} times: the time may not be representative.")),
+    }
+
     if went_well.is_empty() {
         went_well.push("No standout strength flagged from this telemetry slice.".to_string());
     }
@@ -395,6 +418,8 @@ fn build_lap_insight(lap: &LapMetrics, best_lap_time: f64, best_avg_speed: Optio
         avg_speed_kph: lap.avg_speed_kph,
         tyre_temp_avg_c: lap.tyre_temp_avg_c,
         tyre_temp_delta_c: lap.tyre_temp_delta_c,
+        off_track_pcts: lap.off_track_pcts.clone(),
+        incidents: lap.incidents,
         went_well,
         went_bad,
     }
@@ -415,6 +440,10 @@ async fn finalize_split(state: &Arc<AppState>, run: NewRun, model: String) -> Ap
         if let Some(track) = &run.track {
             add_corner_notes(&mut summary, corner_notes(&run.traces, &track.turns, track.length_m));
         }
+        // Early/late upshifts and rev-limiter time go to the coach and the "next time" list.
+        let length_m = run.track.as_ref().map(|t| t.length_m).unwrap_or(0.0);
+        let shifts = shift_report(&run.traces, run.shift_rpm, run.redline_rpm, length_m);
+        summary.suggestions.extend(shifts.notes.into_iter().filter(|n| !n.ends_with("are on time.")));
         let feedback = generate_feedback(&summary, &model);
         (run, summary, feedback, model)
     })
@@ -436,6 +465,8 @@ async fn finalize_split(state: &Arc<AppState>, run: NewRun, model: String) -> Ap
         laps: run.laps,
         traces: run.traces,
         track: run.track,
+        shift_rpm: run.shift_rpm,
+        redline_rpm: run.redline_rpm,
         summary,
         feedback,
     };
@@ -656,6 +687,8 @@ async fn import_split(
                 laps: parse_csv_laps(&path)?,
                 traces: Vec::new(),
                 track: None,
+                shift_rpm: None,
+                redline_rpm: None,
             }),
             _ => anyhow::bail!("Unsupported file type — choose an .ibt or .csv file."),
         }
@@ -833,4 +866,90 @@ async fn compare_split_laps(
         lap_b: split.insight(lap_b),
         summary,
     }))
+}
+#[derive(Debug, Deserialize)]
+struct CornerRequest {
+    lap: i32,
+    /// Compare against this lap; `None` compares against the typical lap from the others.
+    ref_lap: Option<i32>,
+    /// Laps the driver left out of the stats: not used as the typical lap or in rankings.
+    #[serde(default)]
+    exclude: Vec<i32>,
+    /// Also ask the coach model for written advice (slow).
+    #[serde(default)]
+    coach: bool,
+    model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CornerResponse {
+    report: CornerReport,
+    feedback: Option<String>,
+    model: Option<String>,
+}
+
+/// Entry/exit breakdown of one corner on one lap, optionally with written advice from the
+/// coach model.
+async fn analyze_corner(
+    State(state): State<Arc<AppState>>,
+    Path((id, turn)): Path<(String, usize)>,
+    Json(payload): Json<CornerRequest>,
+) -> ApiResult<CornerResponse> {
+    let (report, model) = {
+        let guard = state.inner.lock().expect("state lock poisoned");
+        let split = find_split(&guard.splits, &id)?;
+        let track = split
+            .track
+            .as_ref()
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "No track map for this run."))?;
+        let keep = |n: i32| n == payload.lap || Some(n) == payload.ref_lap || !payload.exclude.contains(&n);
+        let traces: Vec<LapTrace> = split.traces.iter().filter(|t| keep(t.lap_number)).cloned().collect();
+        let report = corner_report(&traces, &track.turns, track.length_m, turn, payload.lap, payload.ref_lap).ok_or_else(|| {
+            error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Can't compare this corner: the lap needs a telemetry trace and there must be another lap to compare with.",
+            )
+        })?;
+        let model = payload
+            .model
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| split.model.clone());
+        (report, model)
+    };
+
+    if !payload.coach {
+        return Ok(Json(CornerResponse { report, feedback: None, model: None }));
+    }
+
+    let prompt = build_corner_prompt(&report);
+    let (feedback, model) = tokio::task::spawn_blocking(move || (ask_model(&prompt, &model), model))
+        .await
+        .map_err(|err| error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Coach failed: {err}")))?;
+    let feedback = feedback.map_err(|err| error_response(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
+    Ok(Json(CornerResponse { report, feedback: Some(feedback), model: Some(model) }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ShiftsQuery {
+    /// Comma-separated laps left out of the stats.
+    exclude: Option<String>,
+}
+
+/// Upshift RPMs for the counted laps, judged against the car's shift light.
+async fn get_shifts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<ShiftsQuery>,
+) -> ApiResult<ShiftReport> {
+    let guard = state.inner.lock().expect("state lock poisoned");
+    let split = find_split(&guard.splits, &id)?;
+    let exclude: Vec<i32> = query
+        .exclude
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let traces: Vec<LapTrace> = split.traces.iter().filter(|t| !exclude.contains(&t.lap_number)).cloned().collect();
+    let length_m = split.track.as_ref().map(|t| t.length_m).unwrap_or(0.0);
+    Ok(Json(shift_report(&traces, split.shift_rpm, split.redline_rpm, length_m)))
 }
