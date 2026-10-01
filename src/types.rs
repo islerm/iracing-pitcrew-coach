@@ -56,6 +56,11 @@ pub struct LapMetrics {
     pub air_temp_c: Option<f64>,
     pub track_temp_c: Option<f64>,
     pub track_wetness: Option<u8>,
+    /// Top speed in kph, and the share of the lap (%) at full throttle and on the brakes.
+    /// `None` when the source has no speed / pedal channels.
+    pub top_speed_kph: Option<f64>,
+    pub full_throttle_pct: Option<f64>,
+    pub braking_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -198,6 +198,21 @@ pub(crate) fn is_continuous(frames: &[Frame]) -> bool {
 /// iRacing's `PlayerTrackSurface` value for "off track".
 const SURFACE_OFF_TRACK: i8 = 0;
 
+/// Top speed in kph, and the share of the lap (%) spent at full throttle and on the brakes.
+/// Samples are evenly spaced in time, so a share of samples is a share of the lap time.
+pub(crate) fn lap_driving(frames: &[Frame]) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let top = frames.iter().map(|f| f.speed_ms).filter(|v| v.is_finite()).fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v))));
+    let share = |value: fn(&Frame) -> f32, on: fn(f32) -> bool| {
+        let known: Vec<f32> = frames.iter().map(value).filter(|v| v.is_finite()).collect();
+        (!known.is_empty()).then(|| known.iter().filter(|v| on(**v)).count() as f64 / known.len() as f64 * 100.0)
+    };
+    (
+        top.map(|v| v as f64 * 3.6),
+        share(|f| f.throttle, |t| t >= 0.98),
+        share(|f| f.brake, |b| b >= 0.05),
+    )
+}
+
 /// Where the lap went off track (one lap fraction per excursion; brief returns to the
 /// surface within a second count as the same excursion) and how many incident points it
 /// picked up. `prev` is the last frame before the lap, the baseline for the incident count.
@@ -406,6 +421,7 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
         let avg_speed_kph = (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64 * 3.6);
         let (off_track_pcts, incidents) = lap_off_tracks(prev, lap_frames);
         let (air_temp_c, track_temp_c, track_wetness) = lap_weather(lap_frames);
+        let (top_speed_kph, full_throttle_pct, braking_pct) = lap_driving(lap_frames);
 
         let (Some(t0), Some(t1)) = (start_time, end_time) else {
             laps.push(LapMetrics {
@@ -421,6 +437,9 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
                 air_temp_c,
                 track_temp_c,
                 track_wetness,
+                top_speed_kph,
+                full_throttle_pct,
+                braking_pct,
             });
             continue;
         };
@@ -495,6 +514,9 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
             air_temp_c,
             track_temp_c,
             track_wetness,
+            top_speed_kph,
+            full_throttle_pct,
+            braking_pct,
         });
 
         if complete {
@@ -734,6 +756,12 @@ mod tests {
         assert_eq!(run.traces.len(), timed.len());
         // Tyre temps are frozen on track in iRacing, so they're dropped.
         assert!(timed.iter().all(|lap| lap.tyre_temp_avg_c.is_none()));
+        for lap in &timed {
+            let (top, full, brake) = (lap.top_speed_kph.unwrap(), lap.full_throttle_pct.unwrap(), lap.braking_pct.unwrap());
+            assert!((200.0..350.0).contains(&top), "lap {} top speed {top}", lap.lap_number);
+            assert!((30.0..90.0).contains(&full), "lap {} full throttle {full}%", lap.lap_number);
+            assert!((3.0..40.0).contains(&brake), "lap {} braking {brake}%", lap.lap_number);
+        }
     }
 
     #[test]

@@ -2514,7 +2514,8 @@
   // ---------- Lap detail ----------
 
   function Metric({ label, value, delta, unit, digits = 1, higherIsBetter, neutral }) {
-    const hasDelta = isNum(delta) && Math.abs(delta) >= 0.05;
+    // Only show a difference that survives rounding to the displayed digits.
+    const hasDelta = isNum(delta) && Math.abs(delta) >= 0.5 * 10 ** -digits;
     const better = hasDelta && (higherIsBetter ? delta > 0 : delta < 0);
     return html`<div className="metric">
       <div className="k">${label}</div>
@@ -2595,8 +2596,15 @@
 
       <div className="metric-grid">
         <${Metric} label="Avg speed" value=${lap.avg_speed_kph} delta=${diff("avg_speed_kph")} higherIsBetter=${true} />
-        <${Metric} label="Tyre avg" value=${lap.tyre_temp_avg_c} delta=${diff("tyre_temp_avg_c")} unit="°" />
-        <${Metric} label="Tyre spread" value=${lap.tyre_temp_delta_c} delta=${diff("tyre_temp_delta_c")} unit="°" />
+        ${isNum(lap.top_speed_kph) ? html`<${Metric} label="Top speed" value=${lap.top_speed_kph} delta=${diff("top_speed_kph")} higherIsBetter=${true} />` : null}
+        ${isNum(lap.full_throttle_pct)
+          ? html`<${Metric} label="Full throttle" value=${lap.full_throttle_pct} delta=${diff("full_throttle_pct")} unit="%" digits=${0} higherIsBetter=${true} />`
+          : null}
+        ${isNum(lap.braking_pct) ? html`<${Metric} label="Braking" value=${lap.braking_pct} delta=${diff("braking_pct")} unit="%" digits=${0} neutral=${true} />` : null}
+        ${isNum(lap.tyre_temp_avg_c)
+          ? html`<${Metric} label="Tyre avg" value=${lap.tyre_temp_avg_c} delta=${diff("tyre_temp_avg_c")} unit="°" />
+              <${Metric} label="Tyre spread" value=${lap.tyre_temp_delta_c} delta=${diff("tyre_temp_delta_c")} unit="°" />`
+          : null}
         ${isNum(lap.track_temp_c) ? html`<${Metric} label="Track temp" value=${lap.track_temp_c} delta=${diff("track_temp_c")} unit="°" neutral=${true} />` : null}
         ${isNum(lap.air_temp_c) ? html`<${Metric} label="Air temp" value=${lap.air_temp_c} delta=${diff("air_temp_c")} unit="°" neutral=${true} />` : null}
         ${lap.track_wetness > 1 ? html`<div className="metric"><div className="k">Track</div><div className="v wet">${WETNESS[lap.track_wetness]}</div></div>` : null}

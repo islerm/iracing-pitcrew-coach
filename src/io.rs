@@ -58,6 +58,9 @@ pub fn parse_csv_laps(path: &Path) -> Result<Vec<LapMetrics>> {
             air_temp_c: None,
             track_temp_c: None,
             track_wetness: None,
+            top_speed_kph: None,
+            full_throttle_pct: None,
+            braking_pct: None,
         });
     }
 

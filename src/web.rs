@@ -300,6 +300,9 @@ struct LapInsight {
     air_temp_c: Option<f64>,
     track_temp_c: Option<f64>,
     track_wetness: Option<u8>,
+    top_speed_kph: Option<f64>,
+    full_throttle_pct: Option<f64>,
+    braking_pct: Option<f64>,
     went_well: Vec<String>,
     went_bad: Vec<String>,
 }
@@ -438,6 +441,9 @@ fn build_lap_insight(lap: &LapMetrics, best_lap_time: f64, best_avg_speed: Optio
         air_temp_c: lap.air_temp_c,
         track_temp_c: lap.track_temp_c,
         track_wetness: lap.track_wetness,
+        top_speed_kph: lap.top_speed_kph,
+        full_throttle_pct: lap.full_throttle_pct,
+        braking_pct: lap.braking_pct,
         went_well,
         went_bad,
     }
