@@ -11,6 +11,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::trace::{Frame, TrackInfo};
+use crate::weather::{self, WeatherSample, WeatherSnapshot};
 
 const HEADER_SIZE: usize = 112;
 const VAR_HEADER_SIZE: usize = 144;
@@ -107,6 +108,7 @@ pub fn parse_track_info(yaml: &str) -> TrackInfo {
         car,
         shift_rpm: rpm("DriverCarSLShiftRPM"),
         redline_rpm: rpm("DriverCarRedLine"),
+        weather: WeatherSnapshot::from_session_info(get),
     }
 }
 
@@ -197,6 +199,7 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
     let v_rpm = find("RPM");
     let v_alt = find("Alt");
     let v_tyres: Vec<Option<Var>> = ["LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL"].iter().map(|n| find(n)).collect();
+    let v_weather: Vec<Option<Var>> = weather::CHANNELS.iter().map(|n| find(n)).collect();
     if v_lap.is_none() || v_pct.is_none() || v_time.is_none() {
         bail!("{} is missing Lap/LapDistPct/SessionTime channels", path.display());
     }
@@ -236,6 +239,7 @@ pub fn read_ibt(path: &Path) -> Result<IbtData> {
             incidents: nan(read_value(&sample, &v_incidents)) as f32,
             rpm: nan(read_value(&sample, &v_rpm)) as f32,
             alt: nan(read_value(&sample, &v_alt)) as f32,
+            weather: WeatherSample::from_channels(|i| read_value(&sample, &v_weather[i])),
         });
     }
 
@@ -251,7 +255,8 @@ const FIXTURE_CHANNELS: &[&str] = &[
     "Throttle", "Brake", "SteeringWheelAngle", "Yaw", "YawNorth", "Lat", "Lon", "LatAccel",
     "Alt", "LongAccel", "OnPitRoad", "IsOnTrack", "LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL",
     "YawRate", "BrakeABSactive", "PlayerTrackSurface", "PlayerCarMyIncidentCount", "BrakeRaw", "VelocityX", "VelocityY", "FuelLevel", "FuelUsePerHour",
-    "dcBrakeBias", "dcABS", "dcTractionControl", "TrackTempCrew", "AirTemp",
+    "dcBrakeBias", "dcABS", "dcTractionControl", "TrackTempCrew", "TrackTemp", "AirTemp", "TrackWetness",
+    "Precipitation", "Skies", "WindVel", "WindDir", "RelativeHumidity", "WeatherDeclaredWet",
 ];
 
 fn type_size(ty: i32) -> usize {
@@ -262,8 +267,8 @@ fn type_size(ty: i32) -> usize {
     }
 }
 
-/// Session info for a fixture: only track, sectors and car. Driver names, iRacing IDs,
-/// clubs, setup, weather and dates are left out entirely rather than masked.
+/// Session info for a fixture: only track, sectors, car and weather. Driver names, iRacing
+/// IDs, clubs, setup and dates are left out entirely rather than masked.
 fn fixture_yaml(original: &str, track: &TrackInfo) -> String {
     let raw = |key: &str| yaml_value(original, key, 0).map(|(v, _)| v.to_string()).unwrap_or_default();
     let mut yaml = String::from("---\nWeekendInfo:\n");
@@ -271,6 +276,15 @@ fn fixture_yaml(original: &str, track: &TrackInfo) -> String {
     yaml += &format!(" TrackDisplayName: {}\n", track.display_name);
     yaml += &format!(" TrackConfigName: {}\n", track.config_name);
     yaml += &format!(" TrackLength: {}\n", raw("TrackLength"));
+    for key in [
+        "TrackWeatherType", "TrackSkies", "TrackSurfaceTemp", "TrackSurfaceTempCrew", "TrackAirTemp", "TrackWindVel",
+        "TrackWindDir", "TrackRelativeHumidity", "TrackFogLevel", "TrackPrecipitation", "TimeOfDay",
+    ] {
+        let value = raw(key);
+        if !value.is_empty() {
+            yaml += &format!(" {key}: {value}\n");
+        }
+    }
     yaml += "SplitTimeInfo:\n Sectors:\n";
     for (i, pct) in track.sector_pcts.iter().enumerate() {
         yaml += &format!(" - SectorNum: {i}\n   SectorStartPct: {pct:.6}\n");

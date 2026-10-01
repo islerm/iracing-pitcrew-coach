@@ -10,6 +10,7 @@ mod live;
 mod trace;
 mod track;
 mod types;
+mod weather;
 mod web;
 
 use anyhow::{bail, Result};

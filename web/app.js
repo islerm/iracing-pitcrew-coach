@@ -1,5 +1,5 @@
 (function () {
-  const { useCallback, useEffect, useMemo, useRef, useState } = React;
+  const { useCallback, useContext, useEffect, useMemo, useRef, useState } = React;
   const html = htm.bind(React.createElement);
 
   const SAMPLE_PATH = "data/practice_session.csv";
@@ -315,6 +315,118 @@
 
   // ---------- Top bar ----------
 
+  // Suggested coach models, smallest first. Sizes are Ollama's download sizes; the model also
+  // needs about that much free GPU memory (or it falls back to the much slower CPU).
+  const RECOMMENDED_MODELS = [
+    { name: "llama3.2", size: "2.0 GB", note: "Fastest, plainest feedback" },
+    { name: "qwen3.5:4b", size: "3.4 GB", note: "Small and quick" },
+    { name: "qwen3.5:9b", size: "6.6 GB", note: "Balance of detail and speed", pick: true },
+    { name: "gemma4:12b", size: "8.0 GB", note: "Most detailed · needs a 12 GB+ GPU" },
+  ];
+
+  /** Ollama names without a tag mean ":latest". */
+  const modelKey = (name) => (name.includes(":") ? name : name + ":latest").toLowerCase();
+  const shortName = (name) => name.replace(/:latest$/, "");
+
+  function ModelPicker({ model, setModel, disabled }) {
+    const [list, setList] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [copied, setCopied] = useState(null);
+    const [custom, setCustom] = useState(false);
+    const load = () => {
+      setLoading(true);
+      api("/api/models")
+        .then(setList)
+        .catch((err) => setList({ ollama: true, installed: [], error: err.message }))
+        .finally(() => setLoading(false));
+    };
+    useEffect(load, []);
+
+    const installed = list ? list.installed : [];
+    const have = new Set(installed.map((m) => modelKey(m.name)));
+    const toGet = RECOMMENDED_MODELS.filter((r) => !have.has(modelKey(r.name)));
+    const current = modelKey(model || "");
+    const noteFor = (m) => (RECOMMENDED_MODELS.find((r) => modelKey(r.name) === modelKey(m.name)) || {}).note;
+    const copy = (text) => {
+      try {
+        navigator.clipboard.writeText(text);
+        setCopied(text);
+        setTimeout(() => setCopied(null), 1500);
+      } catch (_err) {
+        /* clipboard unavailable: the command is in the button's tooltip */
+      }
+    };
+
+    return html`<div className="model-picker">
+      <div className="model-picker-head">
+        <span className="model-picker-title">Coach model</span>
+        <button className="btn btn-ghost btn-icon btn-sm" onClick=${load} disabled=${loading} title="Check for newly downloaded models" aria-label="Refresh model list">
+          ${loading ? html`<span className="spinner"></span>` : "↻"}
+        </button>
+      </div>
+
+      ${list && !list.ollama
+        ? html`<p className="model-warn">Ollama isn't installed or isn't on PATH. Install it from ollama.com to get written feedback.</p>`
+        : list && list.error
+          ? html`<p className="model-warn">${list.error}</p>`
+          : null}
+
+      ${!list
+        ? html`<p className="faint model-help"><span className="spinner inline"></span>Checking installed models…</p>`
+        : installed.length
+          ? html`<div className="model-options" role="radiogroup" aria-label="Coach model">
+              ${installed.map((m) => {
+                const active = current === modelKey(m.name);
+                const note = noteFor(m);
+                return html`<button
+                  key=${m.name}
+                  role="radio"
+                  aria-checked=${active}
+                  className=${"model-option" + (active ? " active" : "")}
+                  disabled=${disabled}
+                  onClick=${() => setModel(shortName(m.name))}
+                >
+                  <span className="model-dot"></span>
+                  <span className="model-text">
+                    <span className="model-name">${shortName(m.name)}</span>
+                    ${note ? html`<span className="model-note">${note}</span>` : null}
+                  </span>
+                  <span className="model-size">${m.size}</span>
+                </button>`;
+              })}
+            </div>`
+          : list.ollama
+            ? html`<p className="faint model-help">No models downloaded yet. Pick one below to get started.</p>`
+            : null}
+
+      ${list && list.ollama && toGet.length
+        ? html`<div className="model-get">
+            <div className="model-get-title">Download more</div>
+            ${toGet.map((r) => {
+              const cmd = `ollama pull ${r.name}`;
+              return html`<div key=${r.name} className="model-get-row">
+                <span className="model-text">
+                  <span className="model-name">${r.name}${r.pick ? html`<span className="model-rec">Recommended</span>` : null}</span>
+                  <span className="model-note">${r.note} · ${r.size}</span>
+                </span>
+                <button className=${"btn btn-sm model-copy" + (copied === cmd ? " done" : "")} onClick=${() => copy(cmd)} title=${cmd}>
+                  ${copied === cmd ? "✓ Copied" : "Copy command"}
+                </button>
+              </div>`;
+            })}
+            <p className="faint model-help">Paste the command into a terminal, then press ↻ once it finishes.</p>
+          </div>`
+        : null}
+
+      ${custom
+        ? html`<div className="field">
+            <label htmlFor="model">Any Ollama model name</label>
+            <input id="model" className="input mono" value=${model} disabled=${disabled} onInput=${(e) => setModel(e.target.value)} placeholder="llama3.2" autoFocus />
+          </div>`
+        : html`<button className="model-link" onClick=${() => setCustom(true)}>Use a different model…</button>`}
+    </div>`;
+  }
+
   function TopBar({ isRecording, recordingStartedAt, replayFile, busy, model, setModel, onStart, onStop, onImport }) {
     const [now, setNow] = useState(Date.now());
     const [settingsOpen, setSettingsOpen] = useState(false);
@@ -341,11 +453,7 @@
         <button className="btn btn-ghost btn-icon" title="Settings" aria-label="Settings" onClick=${() => setSettingsOpen(!settingsOpen)}>⚙</button>
         ${settingsOpen
           ? html`<div className="popover">
-              <div className="field">
-                <label htmlFor="model">Coach model (Ollama)</label>
-                <input id="model" className="input mono" value=${model} disabled=${isRecording} onInput=${(e) => setModel(e.target.value)} placeholder="llama3.2" />
-              </div>
-              <p className="faint" style=${{ fontSize: "12px" }}>Used for the written coach feedback after each run.</p>
+              <${ModelPicker} model=${model} setModel=${setModel} disabled=${isRecording} />
             </div>`
           : null}
       </div>
@@ -604,7 +712,8 @@
   function PaceChart({ laps, stats, excluded, selected, compare, onPick }) {
     const W = 1000;
     const H = 200;
-    const pad = { l: 64, r: 16, t: 14, b: 24 };
+    const temp = trackTempSpan(laps);
+    const pad = { l: 64, r: temp ? 52 : 16, t: 14, b: 24 };
     const timed = laps.filter((lap) => lap.is_complete);
     if (timed.length < 2 || !stats) {
       return html`<p className="muted">Need at least two timed laps to draw a pace chart.</p>`;
@@ -624,6 +733,13 @@
     const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => lo + f * (hi - lo));
     const path = timed.map((lap, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(lap.lap_time_s).toFixed(1)}`).join(" ");
     const labelEvery = Math.ceil(timed.length / 16);
+    // Track temperature on its own scale (right axis), so pace can be read against it.
+    const yTemp = temp ? (c) => pad.t + (1 - (c - temp.lo) / (temp.hi - temp.lo)) * (H - pad.t - pad.b) : null;
+    const tempPath = temp
+      ? timed
+          .map((lap, i) => (isNum(lap.track_temp_c) ? `${x(i).toFixed(1)},${yTemp(lap.track_temp_c).toFixed(1)}` : null))
+          .reduce((d, p, i, all) => (p === null ? d : d + (i && all[i - 1] !== null ? "L" : "M") + p), "")
+      : null;
 
     return html`<svg className="chart" viewBox=${`0 0 ${W} ${H}`} role="img" aria-label="Lap time by lap">
       <g className="grid">
@@ -636,6 +752,13 @@
       </g>
       <line className="avg-line" x1=${pad.l} x2=${W - pad.r} y1=${y(stats.avg)} y2=${y(stats.avg)} />
       <line className="best-line" x1=${pad.l} x2=${W - pad.r} y1=${y(stats.best.lap_time_s)} y2=${y(stats.best.lap_time_s)} />
+      ${temp
+        ? html`<g className="temp-axis">
+            <path className="temp-line" d=${tempPath} />
+            <text x=${W - pad.r + 8} y=${yTemp(temp.hi) + 4}>${temp.hi.toFixed(0)}°C</text>
+            <text x=${W - pad.r + 8} y=${yTemp(temp.lo) + 4}>${temp.lo.toFixed(0)}°C</text>
+          </g>`
+        : null}
       <path className="pace" d=${path} />
       ${timed.map((lap, i) => {
         const cls = [
@@ -646,7 +769,7 @@
           lap.lap_number === selected ? "selected" : "",
         ].join(" ");
         return html`<g key=${lap.lap_number} className=${cls} onClick=${(e) => onPick(lap.lap_number, e.shiftKey)}>
-          <title>Lap ${lap.lap_number}: ${fmtLap(lap.lap_time_s)}${offTracks(lap) ? " · " + offTrackTitle(lap) : ""}</title>
+          <title>Lap ${lap.lap_number}: ${fmtLap(lap.lap_time_s)}${isNum(lap.track_temp_c) ? ` · track ${lap.track_temp_c.toFixed(1)}°C` : ""}${offTracks(lap) ? " · " + offTrackTitle(lap) : ""}</title>
           <circle cx=${x(i)} cy=${y(lap.lap_time_s)} r="5" />
           ${offTracks(lap) ? html`<text className="off-pt" x=${x(i)} y=${y(lap.lap_time_s) - 11}>!</text>` : null}
           ${i % labelEvery === 0 ? html`<text x=${x(i)} y=${H - 6}>${lap.lap_number}</text>` : null}
@@ -788,27 +911,76 @@
     return lo / n;
   }
 
-  function TrackMapView({ map, sel, refTrace: ref, mode, cursorPct, onHover, activeTurn, onTurnClick, selOff, refOff }) {
+  /** viewBox and outline path for a track map, plus `s`: metres per pixel at `size` px wide. */
+  function mapGeometry(points, size = 440) {
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const s = Math.max(maxX - minX, maxY - minY) / size;
+    const pad = 30 * s;
+    return {
+      s,
+      viewBox: `${minX - pad} ${-maxY - pad} ${maxX - minX + 2 * pad} ${maxY - minY + 2 * pad}`,
+      path: points.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${(-p[1]).toFixed(1)}`).join(" ") + "Z",
+    };
+  }
+
+  /** Path along the track between two lap fractions. */
+  function stretchPath(points, start, end) {
+    const n = points.length - 1;
+    const a = idxOf(start, n);
+    const b = idxOf(end, n);
+    const d = [];
+    for (let j = a; j <= b; j++) d.push(`${j === a ? "M" : "L"}${points[j][0].toFixed(1)},${(-points[j][1]).toFixed(1)}`);
+    return d.join(" ");
+  }
+
+  /** Turn badge positions, just outside each corner. */
+  function turnBadges(map, s) {
+    const points = map.points;
+    const n = points.length - 1;
+    return map.turns.map((turn, ti) => {
+      const i = idxOf(turn.pct, n);
+      const k = Math.max(3, Math.round(n / 400));
+      const p0 = points[Math.max(0, i - k)];
+      const p = points[i];
+      const p1 = points[Math.min(n, i + k)];
+      const t1 = [p[0] - p0[0], p[1] - p0[1]];
+      const t2 = [p1[0] - p[0], p1[1] - p[1]];
+      const cross = t1[0] * t2[1] - t1[1] * t2[0]; // > 0: turning left
+      const tx = p1[0] - p0[0];
+      const ty = p1[1] - p0[1];
+      const len = Math.hypot(tx, ty) || 1;
+      const side = cross > 0 ? -1 : 1; // outside of the corner
+      const nx = (side * ty) / len;
+      const ny = (side * -tx) / len;
+      return { ...turn, i: ti, x: p[0] + nx * 20 * s, y: -(p[1] + ny * 20 * s) };
+    });
+  }
+
+  function TurnBadge({ b, s, active, hovered, onClick, onHover }) {
+    return html`<g
+      className=${"turn-badge" + (active ? " active" : "") + (hovered ? " hovered" : "")}
+      transform=${`translate(${b.x} ${b.y})`}
+      onClick=${() => onClick(b.i)}
+      onMouseEnter=${onHover ? () => onHover(b.i) : null}
+      onMouseLeave=${onHover ? () => onHover(null) : null}
+    >
+      <title>Turn ${b.label}: click for an entry and exit breakdown</title>
+      <circle r=${9 * s} />
+      <text fontSize=${(b.label.length > 2 ? 7.5 : 9.5) * s} dy=${3.3 * s}>${b.label}</text>
+    </g>`;
+  }
+
+  function TrackMapView({ map, sel, refTrace: ref, mode, cursorPct, onHover, activeTurn, hoverTurn, onTurnClick, selOff, refOff }) {
     const svgRef = useRef(null);
     const points = map.points;
     const n = points.length - 1;
 
-    const geometry = useMemo(() => {
-      const xs = points.map((p) => p[0]);
-      const ys = points.map((p) => p[1]);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      const size = Math.max(maxX - minX, maxY - minY);
-      const s = size / 440; // metres per screen pixel at the default map size
-      const pad = 30 * s;
-      return {
-        s,
-        viewBox: `${minX - pad} ${-maxY - pad} ${maxX - minX + 2 * pad} ${maxY - minY + 2 * pad}`,
-        path: points.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${(-p[1]).toFixed(1)}`).join(" ") + "Z",
-      };
-    }, [map]);
+    const geometry = useMemo(() => mapGeometry(points), [map]);
     const { s } = geometry;
 
     // Coloured overlay, drawn in short chunks.
@@ -872,26 +1044,7 @@
       return out;
     }, [map, sel, ref, mode]);
 
-    // Turn badges sit just outside each corner.
-    const badges = useMemo(() => {
-      return map.turns.map((turn, ti) => {
-        const i = idxOf(turn.pct, n);
-        const k = Math.max(3, Math.round(n / 400));
-        const p0 = points[Math.max(0, i - k)];
-        const p = points[i];
-        const p1 = points[Math.min(n, i + k)];
-        const t1 = [p[0] - p0[0], p[1] - p0[1]];
-        const t2 = [p1[0] - p[0], p1[1] - p[1]];
-        const cross = t1[0] * t2[1] - t1[1] * t2[0]; // > 0: turning left
-        const tx = p1[0] - p0[0];
-        const ty = p1[1] - p0[1];
-        const len = Math.hypot(tx, ty) || 1;
-        const side = cross > 0 ? -1 : 1; // outside of the corner
-        const nx = (side * ty) / len;
-        const ny = (side * -tx) / len;
-        return { ...turn, i: ti, x: p[0] + nx * 20 * s, y: -(p[1] + ny * 20 * s) };
-      });
-    }, [map]);
+    const badges = useMemo(() => turnBadges(map, s), [map]);
 
     const startLine = useMemo(() => {
       const p = points[0];
@@ -932,34 +1085,18 @@
           <text fontSize=${9 * s} dy=${4 * s}>!</text>
         </g>`;
       });
-    const activeSeg = activeTurn !== null && activeTurn !== undefined ? turnSegments(map.turns)[activeTurn] : null;
-    const activePath = activeSeg
-      ? (() => {
-          const a = idxOf(activeSeg.start, n);
-          const b = idxOf(activeSeg.end, n);
-          const d = [];
-          for (let j = a; j <= b; j++) d.push(`${j === a ? "M" : "L"}${points[j][0].toFixed(1)},${(-points[j][1]).toFixed(1)}`);
-          return d.join(" ");
-        })()
-      : null;
+    const segs = turnSegments(map.turns);
+    const activeSeg = isNum(activeTurn) ? segs[activeTurn] : null;
+    const activePath = activeSeg ? stretchPath(points, activeSeg.start, activeSeg.end) : null;
+    const hoverSeg = isNum(hoverTurn) && hoverTurn !== activeTurn ? segs[hoverTurn] : null;
 
     return html`<svg ref=${svgRef} className="track-map" viewBox=${geometry.viewBox} onMouseMove=${onMove} onMouseLeave=${() => onHover(null)} role="img" aria-label="Track map">
       <path d=${geometry.path} className="map-base" />
       ${activePath ? html`<path d=${activePath} className="map-active" />` : null}
+      ${hoverSeg ? html`<path d=${stretchPath(points, hoverSeg.start, hoverSeg.end)} className="map-active hover" />` : null}
       ${overlay || html`<path d=${geometry.path} className="map-line" />`}
       <line ...${startLine} className="map-start" />
-      ${badges.map(
-        (b) => html`<g
-          key=${b.i}
-          className=${"turn-badge" + (activeTurn === b.i ? " active" : "")}
-          transform=${`translate(${b.x} ${b.y})`}
-          onClick=${() => onTurnClick(b.i)}
-        >
-          <title>Turn ${b.label}: click for an entry and exit breakdown</title>
-          <circle r=${9 * s} />
-          <text fontSize=${(b.label.length > 2 ? 7.5 : 9.5) * s} dy=${3.3 * s}>${b.label}</text>
-        </g>`
-      )}
+      ${badges.map((b) => html`<${TurnBadge} key=${b.i} b=${b} s=${s} active=${activeTurn === b.i} hovered=${hoverTurn === b.i} onClick=${onTurnClick} />`)}
       ${offMarks(refOff, "ref")}
       ${offMarks(selOff, "sel")}
       ${ghost ? html`<circle cx=${ghost[0]} cy=${-ghost[1]} r=${6 * s} className="map-cursor ghost" />` : null}
@@ -967,9 +1104,186 @@
     </svg>`;
   }
 
+  // ---------- Turn references ----------
+
+  /**
+   * Links text that mentions turns to the track map. Provided by RunView once the map has loaded:
+   * `turns`, `hover` ({ turn } or { pct } being pointed at, or null), `setHover`, and `focusTurn(i)`,
+   * which opens that turn's breakdown in the track section.
+   */
+  const TurnContext = React.createContext(null);
+
+  // "Turn 5", "Turns 5 and 6", "turns 10-11", "T5", "T10a".
+  const TURN_RE = /\b([Tt]urns?\s+)(\d{1,2}[a-zA-Z]?(?:\s*(?:,|and|&|or|to|-|–)\s*\d{1,2}[a-zA-Z]?)*)\b|\bT(\d{1,2}[a-zA-Z]?)\b/g;
+
+  function turnIndex(turns, label) {
+    const want = String(label).toLowerCase();
+    return turns.findIndex((t) => t.label.toLowerCase() === want);
+  }
+
+  function TurnChip({ index, children }) {
+    const ctx = useContext(TurnContext);
+    const label = ctx.turns[index].label;
+    return html`<button
+      type="button"
+      className=${"turn-ref" + (ctx.hover && ctx.hover.turn === index ? " hovered" : "")}
+      title=${`Turn ${label}: hover to see it on the map, click to open its breakdown`}
+      onMouseEnter=${() => ctx.setHover({ turn: index })}
+      onMouseLeave=${() => ctx.setHover(null)}
+      onFocus=${() => ctx.setHover({ turn: index })}
+      onBlur=${() => ctx.setHover(null)}
+      onClick=${(e) => {
+        e.stopPropagation();
+        ctx.setHover(null);
+        ctx.focusTurn(index);
+      }}
+    >${children}</button>`;
+  }
+
+  /** Text with every turn it mentions turned into a chip that points at the turn on the map. */
+  function TurnText({ text }) {
+    const ctx = useContext(TurnContext);
+    if (!text || !ctx || !ctx.turns.length) return text || null;
+    const out = [];
+    let last = 0;
+    let k = 0;
+    for (const m of text.matchAll(TURN_RE)) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      last = m.index + m[0].length;
+      if (m[3]) {
+        const i = turnIndex(ctx.turns, m[3]);
+        out.push(i >= 0 ? html`<${TurnChip} key=${k++} index=${i}>${m[0]}<//>` : m[0]);
+        continue;
+      }
+      const nums = m[2].split(/(\d{1,2}[a-zA-Z]?)/);
+      const single = nums.filter((p, j) => j % 2 === 1).length === 1;
+      const i0 = single ? turnIndex(ctx.turns, nums[1]) : -1;
+      if (single && i0 >= 0) {
+        out.push(html`<${TurnChip} key=${k++} index=${i0}>${m[0]}<//>`);
+        continue;
+      }
+      out.push(m[1]);
+      nums.forEach((part, j) => {
+        const i = j % 2 === 1 ? turnIndex(ctx.turns, part) : -1;
+        out.push(i >= 0 ? html`<${TurnChip} key=${k++} index=${i}>${part}<//>` : part);
+      });
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  }
+
+  /**
+   * A small track map pinned to the corner of the window while the main map is scrolled out of
+   * view, so turn numbers in tables and coach notes always have a map next to them.
+   */
+  function MiniMap({ map, title, hidden }) {
+    const ctx = useContext(TurnContext);
+    const [open, setOpen] = useState(() => stored("pcc.miniMap", "open") === "open");
+    const geometry = useMemo(() => mapGeometry(map.points, 220), [map]);
+    const badges = useMemo(() => turnBadges(map, geometry.s), [map, geometry]);
+    const hover = ctx && ctx.hover;
+    // Pointing at a turn while the map is collapsed peeks it open.
+    const show = open || !!hover;
+    if (hidden) return null;
+
+    const toggle = () => {
+      setOpen(!open);
+      store("pcc.miniMap", open ? "closed" : "open");
+    };
+    if (!show) {
+      return html`<button className="mini-map-toggle" onClick=${toggle} title="Show the track map">
+        <svg viewBox=${geometry.viewBox} aria-hidden="true"><path d=${geometry.path} /></svg>
+        Map
+      </button>`;
+    }
+
+    const { s } = geometry;
+    const points = map.points;
+    const segs = turnSegments(map.turns);
+    const seg = hover && isNum(hover.turn) ? segs[hover.turn] : null;
+    const dot = hover && isNum(hover.pct) ? points[idxOf(hover.pct, points.length - 1)] : null;
+    return html`<aside className=${"mini-map" + (open ? "" : " peek")} aria-label="Track map">
+      <div className="mini-map-head">
+        <span className="mini-map-title">${title || "Track"}</span>
+        <button className="btn btn-ghost btn-icon" onClick=${toggle} title=${open ? "Minimise the map" : "Keep the map open"} aria-label=${open ? "Minimise map" : "Keep map open"}>
+          ${open ? "–" : "📌"}
+        </button>
+      </div>
+      <svg className="track-map" viewBox=${geometry.viewBox} role="img" aria-label="Track map">
+        <path d=${geometry.path} className="map-base" />
+        <path d=${geometry.path} className="map-line" />
+        ${seg ? html`<path d=${stretchPath(points, seg.start, seg.end)} className="map-active hover" />` : null}
+        ${badges.map(
+          (b) => html`<${TurnBadge}
+            key=${b.i}
+            b=${b}
+            s=${s}
+            hovered=${seg && hover.turn === b.i}
+            onClick=${(i) => ctx.focusTurn(i)}
+          />`
+        )}
+        ${dot ? html`<circle cx=${dot[0]} cy=${-dot[1]} r=${6 * s} className="map-cursor" />` : null}
+      </svg>
+      <div className="mini-map-hint faint">Click a turn to open its breakdown</div>
+    </aside>`;
+  }
+
+  // ---------- Weather ----------
+
+  const WETNESS = [null, "Dry", "Mostly dry", "Very lightly wet", "Lightly wet", "Moderately wet", "Very wet", "Extremely wet"];
+  const SKY_ICON = { clear: "☀️", "partly cloudy": "⛅", "mostly cloudy": "🌥️", overcast: "☁️" };
+
+  function fmtTempRange(r) {
+    return Math.abs(r.end - r.start) >= 0.5 ? `${r.start.toFixed(0)}→${r.end.toFixed(0)}°C` : `${r.start.toFixed(0)}°C`;
+  }
+
+  const lapWeatherTitle = (lap) =>
+    [isNum(lap.air_temp_c) ? `Air ${lap.air_temp_c.toFixed(1)}°C` : null, lap.track_wetness ? `Track ${(WETNESS[lap.track_wetness] || "").toLowerCase()}` : null].filter(Boolean).join(" · ");
+
+  /** Min and max track temperature over the timed laps, when it moved enough to be worth charting. */
+  function trackTempSpan(laps) {
+    const temps = laps.filter((l) => l.is_complete && isNum(l.track_temp_c)).map((l) => l.track_temp_c);
+    if (temps.length < 2) return null;
+    const lo = Math.min(...temps);
+    const hi = Math.max(...temps);
+    return hi - lo >= 0.5 ? { lo, hi } : null;
+  }
+
+  const rangeTitle = (what, r) => `${what}: ${r.start.toFixed(1)}°C at the start, ${r.end.toFixed(1)}°C at the end (${r.min.toFixed(1)}–${r.max.toFixed(1)}°C)`;
+
+  /** The run's conditions in one line under the title. */
+  function WeatherStrip({ weather: w }) {
+    if (!w) return null;
+    const item = (key, label, value, title, cls) =>
+      html`<span key=${key} className=${"wx " + (cls || "")} title=${title || ""}>${label ? html`<span className="wx-k">${label}</span>` : null}${value}</span>`;
+    const items = [];
+    if (w.skies) {
+      const icon = SKY_ICON[w.skies.toLowerCase()] || "";
+      items.push(item("sky", null, `${icon} ${w.skies}${w.skies_end ? ` → ${w.skies_end.toLowerCase()}` : ""}`, "Sky"));
+    }
+    if (w.air_temp_c) items.push(item("air", "Air", fmtTempRange(w.air_temp_c), rangeTitle("Air temperature", w.air_temp_c)));
+    if (w.track_temp_c) {
+      const swing = w.track_temp_c.max - w.track_temp_c.min >= 4;
+      items.push(item("track", "Track", fmtTempRange(w.track_temp_c), rangeTitle("Track temperature", w.track_temp_c), swing ? "warn" : ""));
+    }
+    if (isNum(w.wind_kph)) items.push(item("wind", "Wind", `${w.wind_kph.toFixed(0)} km/h${w.wind_dir ? " " + w.wind_dir : ""}`, "Average wind speed and direction"));
+    if (isNum(w.humidity_pct)) items.push(item("hum", "Humidity", `${w.humidity_pct.toFixed(0)}%`));
+    if (w.wetness) {
+      const wet = w.wetness !== "Dry" || (w.wetness_end && w.wetness_end !== "Dry");
+      items.push(item("wet", null, `${wet ? "💧 " : ""}${w.wetness}${w.wetness_end ? ` → ${w.wetness_end.toLowerCase()}` : ""}`, "Track surface", wet ? "warn" : ""));
+    }
+    if (isNum(w.rain_pct) && w.rain_pct > 0.5) items.push(item("rain", "Rain", `up to ${w.rain_pct.toFixed(0)}%`, "Heaviest rain during the run", "warn"));
+    if (w.declared_wet) items.push(item("decl", null, "Declared wet", "Race control declared the session wet", "warn"));
+    if (w.time_of_day) items.push(item("tod", null, `🕐 ${w.time_of_day}`, "In-sim time of day when the session started"));
+    if (w.weather_type) items.push(item("type", null, w.weather_type === "Realistic" ? "Dynamic weather" : `${w.weather_type} weather`, null, "faint"));
+    return items.length ? html`<div className="weather-strip">${items}</div>` : null;
+  }
+
   // ---------- Corner table ----------
 
   function CornerTable({ corners, hasRef, activeTurn, onSelectTurn, editing, labels, setLabels }) {
+    const turnCtx = useContext(TurnContext);
+    const hoverRow = (i) => turnCtx && turnCtx.setHover(i === null ? null : { turn: i });
     if (!corners.length) {
       return html`<p className="muted">No corners detected on this track map.</p>`;
     }
@@ -1003,7 +1317,13 @@
         <tbody>
           ${corners.map((c, i) => {
             const speedDiff = isNum(c.minRef) ? c.minSel - c.minRef : null;
-            return html`<tr key=${i} className=${activeTurn === i ? "active" : ""} onClick=${() => onSelectTurn(activeTurn === i ? null : i)}>
+            return html`<tr
+              key=${i}
+              className=${activeTurn === i ? "active" : ""}
+              onClick=${() => onSelectTurn(activeTurn === i ? null : i)}
+              onMouseEnter=${() => hoverRow(i)}
+              onMouseLeave=${() => hoverRow(null)}
+            >
               <td className="l">
                 ${editing
                   ? html`<input
@@ -1677,7 +1997,7 @@
                 ${coach.text
                   ? html`<div className="coach-text">
                       <div className="section-label">Coach <span className="tag">${coach.model}</span></div>
-                      <p className="feedback">${coach.text}</p>
+                      <p className="feedback"><${TurnText} text=${coach.text} /></p>
                     </div>`
                   : coach.error
                     ? html`<p className="bad">${coach.error}</p>`
@@ -1701,6 +2021,8 @@
 
   /** Upshift RPMs by gear against the shift light, the analysed lap's shifts, and the rev limiter. */
   function ShiftsCard({ shifts, selected, turns, onJump }) {
+    const turnCtx = useContext(TurnContext);
+    const hoverPct = (pct) => turnCtx && turnCtx.setHover(pct === null ? null : { pct });
     const ref = shifts.reference_rpm;
     const tol = shifts.tolerance_rpm;
     const pairs = shifts.pairs;
@@ -1733,7 +2055,7 @@
       </p>
       ${shifts.notes.length
         ? html`<ul className=${"note-list " + (shifts.notes.some((n) => n.includes("sooner") || n.includes("longer") || n.includes("limiter")) ? "bad" : "good")}>
-            ${shifts.notes.map((t, i) => html`<li key=${i}>${t}</li>`)}
+            ${shifts.notes.map((t, i) => html`<li key=${i}><${TurnText} text=${t} /></li>`)}
           </ul>`
         : null}
       <div className="shift-layout">
@@ -1777,7 +2099,17 @@
           ${mine.length
             ? html`<div className="shift-chips">
                 ${mine.map(
-                  (s, i) => html`<button key=${i} className=${"shift-chip " + s.verdict} onClick=${() => onJump(s.pct)} title="Show on the map and traces">
+                  (s, i) => html`<button
+                    key=${i}
+                    className=${"shift-chip " + s.verdict}
+                    onClick=${() => {
+                      hoverPct(null);
+                      onJump(s.pct);
+                    }}
+                    onMouseEnter=${() => hoverPct(s.pct)}
+                    onMouseLeave=${() => hoverPct(null)}
+                    title="Show on the map and traces"
+                  >
                     <b>${s.from}→${s.to}</b> <span className="mono">${fmtRpm(s.rpm)}</span>
                     <span className="faint">${afterTurn(turns, s.pct)}</span>
                     ${VERDICT_LABEL[s.verdict] ? html`<span className="verdict">${VERDICT_LABEL[s.verdict]}</span>` : null}
@@ -1799,9 +2131,8 @@
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  function TrackSection({ split, laps, selected, refNumber, excluded, model, traceCache }) {
-    const [map, setMap] = useState(null);
-    const [mapError, setMapError] = useState(null);
+  function TrackSection({ split, laps, selected, refNumber, excluded, model, traceCache, map, setMap, mapError, focus, onMapVisible }) {
+    const turnCtx = useContext(TurnContext);
     const [traces, setTraces] = useState({});
     const [mode, setMode] = useState(() => stored("pcc.mapMode", "delta"));
     const [cursorPct, setCursorPct] = useState(null);
@@ -1810,11 +2141,6 @@
     const [editing, setEditing] = useState(false);
     const [labels, setLabels] = useState([]);
     const traced = new Set(split.traced_laps || []);
-
-    useEffect(() => {
-      if (!split.has_track) return;
-      api(`/api/splits/${split.id}/track`).then(setMap).catch((err) => setMapError(err.message));
-    }, [split.id]);
 
     const selTraced = traced.has(selected);
     const refTraced = refNumber !== null && refNumber !== selected && traced.has(refNumber);
@@ -1863,6 +2189,37 @@
         setView([Math.max(0, seg.start - margin), Math.min(1, seg.end + margin)]);
       }
     };
+
+    // A turn clicked elsewhere on the page (a chip in the coach's notes, the mini-map).
+    useEffect(() => {
+      if (!focus || !segments[focus.turn]) return;
+      selectTurn(focus.turn);
+      scrollToAnalysis();
+    }, [focus]);
+
+    // Tell RunView whether the main map is on screen (or still below it), so the mini-map only
+    // shows once the main map has been scrolled past.
+    const mapBoxRef = useRef(null);
+    const hasMapBox = !!(map && sel);
+    useEffect(() => {
+      const el = mapBoxRef.current;
+      if (!el) {
+        onMapVisible(false);
+        return;
+      }
+      // Cheap enough to run on every scroll event: React skips the update when nothing changed.
+      const check = () => {
+        const r = el.getBoundingClientRect();
+        onMapVisible(r.bottom - r.height * 0.35 > 0);
+      };
+      check();
+      window.addEventListener("scroll", check, { passive: true });
+      window.addEventListener("resize", check);
+      return () => {
+        window.removeEventListener("scroll", check);
+        window.removeEventListener("resize", check);
+      };
+    }, [hasMapBox]);
 
     async function saveLabels() {
       try {
@@ -1949,18 +2306,21 @@
           ? html`<p className="muted">Lap ${selected} wasn't a clean timed lap, so it has no telemetry trace. Pick another lap.</p>`
           : html`<div className="analysis-grid">
               <div className="analysis-side">
+                <div ref=${mapBoxRef} className="map-box">
                 <${TrackMapView}
                   map=${map}
                   sel=${sel}
                   refTrace=${ref}
                   mode=${mapMode}
-                  cursorPct=${cursorPct}
+                  cursorPct=${isNum(cursorPct) ? cursorPct : turnCtx && turnCtx.hover && isNum(turnCtx.hover.pct) ? turnCtx.hover.pct : null}
                   onHover=${setCursorPct}
                   activeTurn=${activeTurn}
+                  hoverTurn=${turnCtx && turnCtx.hover ? turnCtx.hover.turn : null}
                   onTurnClick=${(i) => selectTurn(activeTurn === i ? null : i)}
                   selOff=${selLap && selLap.off_track_pcts}
                   refOff=${ref && refLap ? refLap.off_track_pcts : null}
                 />
+                </div>
                 <div className="map-legend">
                   ${mapMode === "delta"
                     ? ref
@@ -2089,6 +2449,7 @@
     const nSectors = stats ? stats.nSectors : 0;
     const showTyres = laps.some((lap) => isNum(lap.tyre_temp_avg_c));
     const showIncidents = laps.some((lap) => isNum(lap.incidents));
+    const showTrackTemp = laps.some((lap) => isNum(lap.track_temp_c));
     const bestTime = stats ? stats.best.lap_time_s : null;
 
     return html`<div className="table-wrap">
@@ -2103,6 +2464,7 @@
             <th>Avg kph</th>
             ${showIncidents ? html`<th title="Incident points picked up on the lap">Inc</th>` : null}
             ${showTyres ? html`<th>Tyre °C</th><th>Spread</th>` : null}
+            ${showTrackTemp ? html`<th title="Average track temperature over the lap">Track °C</th>` : null}
           </tr>
         </thead>
         <tbody>
@@ -2141,6 +2503,7 @@
               <td>${fmtNum(lap.avg_speed_kph, 1)}</td>
               ${showIncidents ? html`<td className=${lap.incidents > 0 ? "bad" : "faint"}>${isNum(lap.incidents) ? (lap.incidents > 0 ? lap.incidents + "x" : "0") : "—"}</td>` : null}
               ${showTyres ? html`<td>${fmtNum(lap.tyre_temp_avg_c, 1)}</td><td>${fmtNum(lap.tyre_temp_delta_c, 1)}</td>` : null}
+              ${showTrackTemp ? html`<td title=${lapWeatherTitle(lap)}>${fmtNum(lap.track_temp_c, 1)}${lap.track_wetness > 1 ? html` <span className="tag tag-wet">wet</span>` : null}</td>` : null}
             </tr>`;
           })}
         </tbody>
@@ -2150,13 +2513,13 @@
 
   // ---------- Lap detail ----------
 
-  function Metric({ label, value, delta, unit, digits = 1, higherIsBetter }) {
+  function Metric({ label, value, delta, unit, digits = 1, higherIsBetter, neutral }) {
     const hasDelta = isNum(delta) && Math.abs(delta) >= 0.05;
     const better = hasDelta && (higherIsBetter ? delta > 0 : delta < 0);
     return html`<div className="metric">
       <div className="k">${label}</div>
       <div className="v">${fmtNum(value, digits, unit)}</div>
-      <div className=${"dv " + (hasDelta ? (better ? "good" : "bad") : "faint")}>
+      <div className=${"dv " + (hasDelta ? (neutral ? "faint" : better ? "good" : "bad") : "faint")}>
         ${hasDelta ? (delta > 0 ? "+" : "−") + Math.abs(delta).toFixed(digits) : " "}
       </div>
     </div>`;
@@ -2234,6 +2597,9 @@
         <${Metric} label="Avg speed" value=${lap.avg_speed_kph} delta=${diff("avg_speed_kph")} higherIsBetter=${true} />
         <${Metric} label="Tyre avg" value=${lap.tyre_temp_avg_c} delta=${diff("tyre_temp_avg_c")} unit="°" />
         <${Metric} label="Tyre spread" value=${lap.tyre_temp_delta_c} delta=${diff("tyre_temp_delta_c")} unit="°" />
+        ${isNum(lap.track_temp_c) ? html`<${Metric} label="Track temp" value=${lap.track_temp_c} delta=${diff("track_temp_c")} unit="°" neutral=${true} />` : null}
+        ${isNum(lap.air_temp_c) ? html`<${Metric} label="Air temp" value=${lap.air_temp_c} delta=${diff("air_temp_c")} unit="°" neutral=${true} />` : null}
+        ${lap.track_wetness > 1 ? html`<div className="metric"><div className="k">Track</div><div className="v wet">${WETNESS[lap.track_wetness]}</div></div>` : null}
       </div>
 
       ${insight
@@ -2258,6 +2624,22 @@
     const [selected, setSelected] = useState(null);
     const [compare, setCompare] = useState(null);
     const traceCache = useRef(new Map());
+
+    // The track map is shared: the track section draws it, and turn chips and the mini-map
+    // anywhere on the page point at it.
+    const [map, setMap] = useState(null);
+    const [mapError, setMapError] = useState(null);
+    const [hover, setHover] = useState(null);
+    const [focus, setFocus] = useState(null);
+    const [mainMapVisible, setMainMapVisible] = useState(false);
+    useEffect(() => {
+      if (!split.has_track) return;
+      api(`/api/splits/${split.id}/track`).then(setMap).catch((err) => setMapError(err.message));
+    }, [split.id]);
+    const turnCtx = useMemo(
+      () => (map && map.turns.length ? { turns: map.turns, hover, setHover, focusTurn: (turn) => setFocus({ turn, at: Date.now() }) } : null),
+      [map, hover]
+    );
 
     // Start on the most recent timed lap.
     useEffect(() => {
@@ -2340,11 +2722,12 @@
       .filter(Boolean)
       .join(" · ");
 
-    return html`<${React.Fragment}>
+    return html`<${TurnContext.Provider} value=${turnCtx}>
       <div className="page-head">
         <div>
           <h1>${runTitle(split)}</h1>
           <p>${subtitle}</p>
+          <${WeatherStrip} weather=${split.summary && split.summary.weather} />
         </div>
       </div>
 
@@ -2409,6 +2792,7 @@
             <span><i className="sel-bg"></i>Analysing</span>
             <span><i className="ref-bg"></i>Compared with</span>
             <span><span className="off-mark">!</span>Off track</span>
+            ${trackTempSpan(laps) ? html`<span><i className="temp-key"></i>Track temp (right axis)</span>` : null}
           </div>
         </div>
         <${PaceChart} laps=${laps} stats=${stats} excluded=${excluded} selected=${selected} compare=${refNumber} onPick=${pick} />
@@ -2422,6 +2806,11 @@
         excluded=${excluded}
         model=${model}
         traceCache=${traceCache}
+        map=${map}
+        setMap=${setMap}
+        mapError=${mapError}
+        focus=${focus}
+        onMapVisible=${setMainMapVisible}
       />
 
       <div className="split-2">
@@ -2439,7 +2828,7 @@
         <section className="card">
           <div className="card-head"><div className="card-title">Next time out</div></div>
           <ol className="suggestions">
-            ${split.suggestions.map((t, i) => html`<li key=${i}><b>${i + 1}</b><span>${t}</span></li>`)}
+            ${split.suggestions.map((t, i) => html`<li key=${i}><b>${i + 1}</b><span><${TurnText} text=${t} /></span></li>`)}
           </ol>
         </section>
         <section className="card">
@@ -2447,9 +2836,11 @@
             <div className="card-title">Coach feedback</div>
             <span className="tag">${split.model}</span>
           </div>
-          <p className="feedback">${split.feedback}</p>
+          <p className="feedback"><${TurnText} text=${split.feedback} /></p>
         </section>
       </div>
+
+      ${map && map.turns.length ? html`<${MiniMap} map=${map} title=${split.track_label} hidden=${mainMapVisible} />` : null}
     <//>`;
   }
 

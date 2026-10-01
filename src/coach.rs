@@ -70,13 +70,21 @@ impl std::fmt::Display for ModelError {
 /// Runs one prompt through the local Ollama model and returns the cleaned-up answer.
 pub fn ask_model(prompt: &str, model_name: &str) -> Result<String, ModelError> {
     let ollama_path = find_executable("ollama").ok_or(ModelError::NotInstalled)?;
-    let result = Command::new(ollama_path)
-        .arg("run")
-        .arg("--nowordwrap")
-        .arg(model_name)
-        .arg(prompt)
-        .output()
-        .map_err(|err| ModelError::Failed(err.to_string()))?;
+    let run = |think_flag: bool| {
+        let mut command = Command::new(&ollama_path);
+        command.arg("run").arg("--nowordwrap");
+        // Reasoning models (Qwen 3.5, Gemma 4, …) would otherwise think out loud first: slower,
+        // and the reasoning would land in the answer. Other models ignore the flag.
+        if think_flag {
+            command.arg("--think=false");
+        }
+        command.arg(model_name).arg(prompt).output().map_err(|err| ModelError::Failed(err.to_string()))
+    };
+    let mut result = run(true)?;
+    // Ollama releases before thinking support don't know the flag.
+    if !result.status.success() && String::from_utf8_lossy(&result.stderr).contains("unknown flag") {
+        result = run(false)?;
+    }
     if !result.status.success() {
         let stderr = strip_ansi(&String::from_utf8_lossy(&result.stderr)).trim().to_string();
         return Err(ModelError::Failed(if stderr.is_empty() { format!("exit status {}", result.status) } else { stderr }));
@@ -91,6 +99,41 @@ pub fn ask_model(prompt: &str, model_name: &str) -> Result<String, ModelError> {
     } else {
         Ok(stdout)
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstalledModel {
+    pub name: String,
+    /// As Ollama prints it, e.g. "4.7 GB".
+    pub size: String,
+}
+
+/// Models already downloaded to this PC, from `ollama list`.
+pub fn installed_models() -> Result<Vec<InstalledModel>, ModelError> {
+    let ollama_path = find_executable("ollama").ok_or(ModelError::NotInstalled)?;
+    let result = Command::new(ollama_path).arg("list").output().map_err(|err| ModelError::Failed(err.to_string()))?;
+    if !result.status.success() {
+        let stderr = strip_ansi(&String::from_utf8_lossy(&result.stderr)).trim().to_string();
+        return Err(ModelError::Failed(if stderr.is_empty() { format!("exit status {}", result.status) } else { stderr }));
+    }
+    Ok(parse_model_list(&strip_ansi(&String::from_utf8_lossy(&result.stdout))))
+}
+
+/// Parses `ollama list`: a header, then `NAME  ID  SIZE  MODIFIED` rows, where SIZE is two
+/// words ("4.7 GB") and MODIFIED several ("4 days ago").
+fn parse_model_list(text: &str) -> Vec<InstalledModel> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let name = cols.first()?.to_string();
+            let size = match (cols.get(2), cols.get(3)) {
+                (Some(n), Some(unit)) => format!("{n} {unit}"),
+                _ => String::new(),
+            };
+            Some(InstalledModel { name, size })
+        })
+        .collect()
 }
 
 /// Removes terminal escape sequences (spinner, cursor moves) that Ollama writes to stdout.
@@ -135,4 +178,21 @@ pub fn speak_feedback(text: &str, voice: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ollama_list() {
+        let text = "NAME               ID              SIZE      MODIFIED    \n\
+                    qwen2.5:7b         845dbda0ea48    4.7 GB    4 days ago     \n\
+                    llama3.2:latest    a80c4f17acd5    2.0 GB    11 days ago    \n";
+        let models = parse_model_list(text);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].name, "qwen2.5:7b");
+        assert_eq!(models[1].size, "2.0 GB");
+        assert!(parse_model_list("NAME ID SIZE MODIFIED\n").is_empty());
+    }
 }

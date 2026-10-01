@@ -107,6 +107,13 @@ fn capture_live_telemetry(
                 car,
                 shift_rpm: Some(session.drivers.shift_light_shift_rpm as f64).filter(|v| *v > 0.0),
                 redline_rpm: Some(session.drivers.red_line_rpm as f64).filter(|v| *v > 0.0),
+                // The rest of the weather comes from the telemetry channels on every sample.
+                weather: crate::weather::WeatherSnapshot {
+                    weather_type: session.weekend.track_weather.clone(),
+                    skies: session.weekend.track_skies.clone(),
+                    wind_ms: crate::weather::wind_ms(&session.weekend.track_wind_speed),
+                    ..Default::default()
+                },
             })
         }
         Err(err) => {
@@ -178,6 +185,7 @@ fn capture_live_telemetry(
             incidents: nan(num(&telem, "PlayerCarMyIncidentCount")) as f32,
             rpm: nan(num(&telem, "RPM")) as f32,
             alt: nan(num(&telem, "Alt")) as f32,
+            weather: crate::weather::WeatherSample::from_channels(|i| num(&telem, crate::weather::CHANNELS[i])),
         };
 
         if verbose {

@@ -1,4 +1,5 @@
 use crate::types::{LapMetrics, SessionSummary};
+use crate::weather::SessionWeather;
 
 pub fn average(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
@@ -31,6 +32,7 @@ pub fn summarize_session(laps: &[LapMetrics]) -> SessionSummary {
                 "Keep recording until you cross the finish line again so the app can compare full laps.".to_string(),
             ],
             corner_notes: Vec::new(),
+            weather: None,
         };
     }
 
@@ -103,6 +105,7 @@ pub fn summarize_session(laps: &[LapMetrics]) -> SessionSummary {
         tyre_temp_delta_c: if temp_delta > 0.0 { Some(temp_delta) } else { None },
         suggestions,
         corner_notes: Vec::new(),
+        weather: None,
     }
 }
 
@@ -114,6 +117,14 @@ pub fn add_corner_notes(summary: &mut SessionSummary, notes: Vec<String>) {
         summary.suggestions.insert(at + i, note.clone());
     }
     summary.corner_notes = notes;
+}
+
+/// Attaches the run's conditions, with any suggestions they lead to (a big swing in track
+/// temperature, a wet track).
+pub fn add_weather(summary: &mut SessionSummary, weather: Option<SessionWeather>, laps: &[LapMetrics]) {
+    let Some(mut weather) = weather else { return };
+    summary.suggestions.extend(crate::weather::annotate(&mut weather, laps, summary.fastest_lap));
+    summary.weather = Some(weather);
 }
 
 /// Measurements available for this run, one per line. Missing data is left out rather than
@@ -137,6 +148,15 @@ fn data_lines(summary: &SessionSummary) -> String {
     }
     if let Some(spread) = summary.tyre_temp_delta_c {
         lines.push(format!("Tyre temp spread: {spread:.1}C"));
+    }
+    if let Some(weather) = &summary.weather {
+        let text = crate::weather::describe(weather);
+        if !text.is_empty() {
+            lines.push(format!("Conditions: {text}"));
+        }
+        if let Some(temp) = weather.fastest_lap_track_temp_c {
+            lines.push(format!("Track temp during the fastest lap: {temp:.1}C"));
+        }
     }
     if !summary.corner_notes.is_empty() {
         lines.push("Corners where the fastest lap lost the most time vs the driver's best in that corner:".to_string());

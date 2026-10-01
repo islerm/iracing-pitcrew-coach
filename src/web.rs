@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
-    analysis::{add_corner_notes, summarize_session},
+    analysis::{add_corner_notes, add_weather, summarize_session},
     handling::{corner_notes, peak_combined_g},
-    coach::{ask_model, generate_feedback},
+    coach::{ask_model, generate_feedback, installed_models, InstalledModel, ModelError},
     corner::{build_corner_prompt, corner_report, CornerReport},
     gears::{shift_report, ShiftReport},
     ibt::read_ibt,
@@ -28,6 +28,7 @@ use crate::{
     trace::{build_run, Frame, LapTrace, TrackInfo, Turn},
     track::{self, TrackMap},
     types::{LapMetrics, SessionSummary},
+    weather::{session_weather, SessionWeather},
 };
 
 pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, f64)>) -> Result<()> {
@@ -45,6 +46,7 @@ pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, 
 
         let api = Router::new()
             .route("/status", get(get_status))
+            .route("/models", get(list_models))
             .route("/recording/start", post(start_recording))
             .route("/recording/stop", post(stop_recording))
             .route("/recording/live", get(get_live_recording))
@@ -72,7 +74,15 @@ pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, 
                 ServeDir::new("web")
                     .append_index_html_on_directories(true)
                     .fallback(ServeFile::new("web/index.html")),
-            );
+            )
+            // Have browsers check for a newer app.js/styles.css on every load, so an update
+            // shows up on a normal refresh instead of the cached copy.
+            .layer(axum::middleware::map_response(|mut response: axum::response::Response| async move {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
+                response
+            }));
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         println!("Pit Crew Coach UI running at http://127.0.0.1:{port}");
@@ -131,6 +141,7 @@ struct NewRun {
     track: Option<TrackMap>,
     shift_rpm: Option<f64>,
     redline_rpm: Option<f64>,
+    weather: Option<SessionWeather>,
 }
 
 impl NewRun {
@@ -154,6 +165,7 @@ impl NewRun {
             track,
             shift_rpm: track_info.shift_rpm,
             redline_rpm: track_info.redline_rpm,
+            weather: session_weather(frames, &track_info.weather),
         }
     }
 }
@@ -285,6 +297,9 @@ struct LapInsight {
     tyre_temp_delta_c: Option<f64>,
     off_track_pcts: Vec<f64>,
     incidents: Option<u32>,
+    air_temp_c: Option<f64>,
+    track_temp_c: Option<f64>,
+    track_wetness: Option<u8>,
     went_well: Vec<String>,
     went_bad: Vec<String>,
 }
@@ -420,6 +435,9 @@ fn build_lap_insight(lap: &LapMetrics, best_lap_time: f64, best_avg_speed: Optio
         tyre_temp_delta_c: lap.tyre_temp_delta_c,
         off_track_pcts: lap.off_track_pcts.clone(),
         incidents: lap.incidents,
+        air_temp_c: lap.air_temp_c,
+        track_temp_c: lap.track_temp_c,
+        track_wetness: lap.track_wetness,
         went_well,
         went_bad,
     }
@@ -437,6 +455,7 @@ async fn finalize_split(state: &Arc<AppState>, run: NewRun, model: String) -> Ap
 
     let (run, summary, feedback, model) = tokio::task::spawn_blocking(move || {
         let mut summary = summarize_session(&run.laps);
+        add_weather(&mut summary, run.weather.clone(), &run.laps);
         if let Some(track) = &run.track {
             add_corner_notes(&mut summary, corner_notes(&run.traces, &track.turns, track.length_m));
         }
@@ -493,6 +512,24 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         split_count: guard.splits.len(),
         default_model: guard.default_model.clone(),
         replay_file: guard.replay.as_ref().map(|(path, _)| path.display().to_string()),
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct ModelsResponse {
+    /// False when the `ollama` command can't be found.
+    ollama: bool,
+    installed: Vec<InstalledModel>,
+    error: Option<String>,
+}
+
+async fn list_models() -> impl IntoResponse {
+    let listed = tokio::task::spawn_blocking(installed_models).await;
+    Json(match listed {
+        Ok(Ok(installed)) => ModelsResponse { ollama: true, installed, error: None },
+        Ok(Err(ModelError::NotInstalled)) => ModelsResponse { ollama: false, installed: Vec::new(), error: None },
+        Ok(Err(err)) => ModelsResponse { ollama: true, installed: Vec::new(), error: Some(err.to_string()) },
+        Err(err) => ModelsResponse { ollama: true, installed: Vec::new(), error: Some(err.to_string()) },
     })
 }
 
@@ -689,6 +726,7 @@ async fn import_split(
                 track: None,
                 shift_rpm: None,
                 redline_rpm: None,
+                weather: None,
             }),
             _ => anyhow::bail!("Unsupported file type — choose an .ibt or .csv file."),
         }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::weather::SessionWeather;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LapRecord {
     #[serde(rename = "lap")]
@@ -49,6 +51,11 @@ pub struct LapMetrics {
     pub off_track_pcts: Vec<f64>,
     /// Incident points picked up during the lap. `None` when the source has no incident count.
     pub incidents: Option<u32>,
+    /// Average air and track temperature over the lap, and the wettest the track got
+    /// (`TrackWetness`: 1 dry … 7 extremely wet). `None` when the source has no weather channels.
+    pub air_temp_c: Option<f64>,
+    pub track_temp_c: Option<f64>,
+    pub track_wetness: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,4 +71,6 @@ pub struct SessionSummary {
     pub suggestions: Vec<String>,
     /// Corner-by-corner findings from the lap traces (see `handling::corner_notes`).
     pub corner_notes: Vec<String>,
+    /// Conditions during the run (see `weather::session_weather`).
+    pub weather: Option<SessionWeather>,
 }

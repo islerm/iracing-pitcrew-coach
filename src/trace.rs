@@ -4,6 +4,7 @@
 use serde::Serialize;
 
 use crate::types::LapMetrics;
+use crate::weather::{lap_weather, WeatherSample, WeatherSnapshot};
 
 /// One telemetry sample. Missing channels are NaN.
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +42,7 @@ pub struct Frame {
     pub rpm: f32,
     /// `Alt`: altitude in metres. Only in .ibt files (live telemetry has no position data).
     pub alt: f32,
+    pub weather: WeatherSample,
 }
 
 impl Default for Frame {
@@ -70,6 +72,7 @@ impl Default for Frame {
             incidents: f32::NAN,
             rpm: f32::NAN,
             alt: f32::NAN,
+            weather: WeatherSample::default(),
         }
     }
 }
@@ -88,6 +91,8 @@ pub struct TrackInfo {
     pub shift_rpm: Option<f64>,
     /// `DriverCarRedLine`.
     pub redline_rpm: Option<f64>,
+    /// Conditions from the session info (see `weather`).
+    pub weather: WeatherSnapshot,
 }
 
 /// Channels resampled onto a fixed lap-distance grid (`n + 1` points from 0.0 to 1.0),
@@ -391,12 +396,16 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
         let speeds: Vec<f64> = lap_frames.iter().map(|f| f.speed_ms as f64).filter(|v| !v.is_nan()).collect();
 
         // iRacing only refreshes tyre temperatures in the pit stall, so on track the values are
-        // frozen. Only report them if they actually changed during the lap.
-        let tyres_live = tyre_max - tyre_min > 0.05;
+        // frozen. Only report them if they actually changed during the lap: the four tyres
+        // always differ from each other, so it's the average over time that has to move.
+        let avg_lo = tyre_avgs.iter().copied().fold(f64::INFINITY, f64::min);
+        let avg_hi = tyre_avgs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let tyres_live = avg_hi - avg_lo > 0.05;
         let tyre_temp_avg_c = (tyres_live && !tyre_avgs.is_empty()).then(|| tyre_avgs.iter().sum::<f64>() / tyre_avgs.len() as f64);
         let tyre_temp_delta_c = tyres_live.then(|| (tyre_max - tyre_min) as f64);
         let avg_speed_kph = (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64 * 3.6);
         let (off_track_pcts, incidents) = lap_off_tracks(prev, lap_frames);
+        let (air_temp_c, track_temp_c, track_wetness) = lap_weather(lap_frames);
 
         let (Some(t0), Some(t1)) = (start_time, end_time) else {
             laps.push(LapMetrics {
@@ -409,6 +418,9 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
                 tyre_temp_delta_c,
                 off_track_pcts,
                 incidents,
+                air_temp_c,
+                track_temp_c,
+                track_wetness,
             });
             continue;
         };
@@ -480,6 +492,9 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
             tyre_temp_delta_c,
             off_track_pcts,
             incidents,
+            air_temp_c,
+            track_temp_c,
+            track_wetness,
         });
 
         if complete {
@@ -809,6 +824,30 @@ mod tests {
         let rms = heading_vs_gps_rms(&data.frames, &data.track);
         println!("heading vs GPS outline: {rms:.1} m RMS");
         assert!(rms < 30.0);
+    }
+
+    #[test]
+    fn frozen_tyre_temps_are_dropped() {
+        // Two and a half laps at 10 Hz. Tyres differ from each other (60–69C) but, as on track
+        // in iRacing, never change; then the same run with temperatures that do move.
+        let frames = |rise: f32| -> Vec<Frame> {
+            (0..250)
+                .map(|i| Frame {
+                    time: i as f64 * 0.1,
+                    pct: (i as f64 / 100.0 + 0.5) % 1.0,
+                    lap: 1 + (i + 50) / 100,
+                    tyre_avg: 64.5 + rise * i as f32,
+                    tyre_min: 60.0 + rise * i as f32,
+                    tyre_max: 69.0 + rise * i as f32,
+                    ..Frame::default()
+                })
+                .collect()
+        };
+        let frozen = build_run(&frames(0.0), &TrackInfo::default());
+        assert!(!frozen.laps.is_empty());
+        assert!(frozen.laps.iter().all(|lap| lap.tyre_temp_avg_c.is_none() && lap.tyre_temp_delta_c.is_none()));
+        let live = build_run(&frames(0.01), &TrackInfo::default());
+        assert!(live.laps.iter().all(|lap| lap.tyre_temp_avg_c.is_some()));
     }
 
     #[test]

@@ -55,6 +55,9 @@ pub fn parse_csv_laps(path: &Path) -> Result<Vec<LapMetrics>> {
             tyre_temp_delta_c: temp_delta,
             off_track_pcts: Vec::new(),
             incidents: None,
+            air_temp_c: None,
+            track_temp_c: None,
+            track_wetness: None,
         });
     }
 

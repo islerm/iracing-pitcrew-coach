@@ -175,12 +175,12 @@ pub fn shift_report(traces: &[LapTrace], shift_rpm: Option<f64>, redline_rpm: Op
             let diff = p.median_rpm - r;
             if p.early * 2 > p.count {
                 notes.push(format!(
-                    "{}→{}: you usually change up at {:.0} rpm, {:.0} rpm before {} ({} of {} early). Holding the gear longer should be quicker.",
+                    "Gear {}→{} upshift: you usually change up at {:.0} rpm, {:.0} rpm before {} ({} of {} early). Holding the gear longer should be quicker.",
                     p.from, p.to, p.median_rpm, -diff, reference_source.as_deref().unwrap_or("the reference"), p.early, p.count
                 ));
             } else if p.late * 2 > p.count {
                 notes.push(format!(
-                    "{}→{}: you usually change up at {:.0} rpm, {:.0} rpm past {} ({} of {} late). Change up sooner.",
+                    "Gear {}→{} upshift: you usually change up at {:.0} rpm, {:.0} rpm past {} ({} of {} late). Change up sooner.",
                     p.from, p.to, p.median_rpm, diff, reference_source.as_deref().unwrap_or("the reference"), p.late, p.count
                 ));
             }
