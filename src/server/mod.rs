@@ -2,10 +2,12 @@
 
 mod files;
 mod recording;
+mod settings;
 mod splits;
 mod voice;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +19,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::coach::{installed_models, InstalledModel, ModelError};
@@ -26,7 +28,14 @@ use crate::voice::{Tts, VoiceEngine};
 use recording::RecordingState;
 use splits::PracticeSplit;
 
-pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, f64)>, tts: Tts, voice: Option<String>) -> Result<()> {
+pub fn run_ui_server(
+    port: u16,
+    default_model: String,
+    replay: Option<(PathBuf, f64)>,
+    auto_record: bool,
+    tts: Tts,
+    voice: Option<String>,
+) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let voice = Arc::new(VoiceEngine::new(tts, voice.as_deref()));
@@ -34,18 +43,29 @@ pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, 
         tokio::task::spawn_blocking(move || warming.warm_up());
         let state = Arc::new(AppState {
             voice,
+            live_radio: AtomicBool::new(true),
+            radio_volume: AtomicU32::new(settings::Settings::load().radio_volume.to_bits()),
+            auto_record,
             inner: Mutex::new(Inner {
                 default_model,
                 replay,
                 recording: None,
+                auto_held: false,
                 splits: Vec::new(),
                 next_split_id: 1,
             }),
         });
+        if auto_record {
+            recording::spawn_auto_recorder(Arc::clone(&state), tokio::runtime::Handle::current());
+        }
 
         let api = Router::new()
             .route("/status", get(get_status))
             .route("/models", get(list_models))
+            .route("/model", post(set_model))
+            .route("/radio", post(set_radio))
+            .route("/radio/volume", post(voice::set_radio_volume))
+            .route("/radio/test", post(voice::test_radio))
             .route("/recording/start", post(recording::start_recording))
             .route("/recording/stop", post(recording::stop_recording))
             .route("/recording/live", get(recording::get_live_recording))
@@ -55,10 +75,12 @@ pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, 
             .route("/splits/:id", get(splits::get_split).delete(splits::delete_split))
             .route("/splits/:id/track", get(splits::get_split_track))
             .route("/splits/:id/track/turns", post(splits::update_track_turns))
+            .route("/splits/:id/track/rotation", post(splits::update_track_rotation))
             .route("/splits/:id/laps", get(splits::list_split_laps))
             .route("/splits/:id/laps/:lap_number/trace", get(splits::get_lap_trace))
             .route("/splits/:id/corners/:turn", post(splits::analyze_corner))
             .route("/splits/:id/shifts", get(splits::get_shifts))
+            .route("/splits/:id/feedback", post(splits::get_feedback))
             .route("/voice", get(voice::get_voice))
             .route("/speak", post(voice::speak))
             .route("/speak/plan", post(voice::speak_plan))
@@ -95,10 +117,24 @@ pub fn run_ui_server(port: u16, default_model: String, replay: Option<(PathBuf, 
 
 struct AppState {
     voice: Arc<VoiceEngine>,
+    /// Recordings start and stop by themselves as the driver gets in and out of the car.
+    auto_record: bool,
+    /// Whether the pit engineer speaks after each lap during a recording.
+    live_radio: AtomicBool,
+    /// Loudness multiplier for the radio calls, as f32 bits.
+    radio_volume: AtomicU32,
     inner: Mutex<Inner>,
 }
 
 impl AppState {
+    fn radio_volume(&self) -> f32 {
+        f32::from_bits(self.radio_volume.load(Ordering::Relaxed))
+    }
+
+    fn set_radio_volume(&self, volume: f32) {
+        self.radio_volume.store(volume.to_bits(), Ordering::Relaxed);
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("state lock poisoned")
     }
@@ -118,6 +154,9 @@ struct Inner {
     /// When set, recordings replay this .ibt (at the given speed) instead of reading iRacing.
     replay: Option<(PathBuf, f64)>,
     recording: Option<RecordingState>,
+    /// Set when a recording is stopped by hand, so the auto-recorder waits for the driver
+    /// to leave the car before starting another.
+    auto_held: bool,
     /// Shared so a request can work on a split without holding the lock.
     splits: Vec<Arc<PracticeSplit>>,
     next_split_id: u64,
@@ -163,17 +202,37 @@ fn modified_ms(meta: &std::fs::Metadata) -> Option<u128> {
 #[derive(Debug, Serialize)]
 struct StatusResponse {
     is_recording: bool,
+    auto_record: bool,
     default_model: String,
     replay_file: Option<String>,
+    split_count: usize,
+    live_radio: bool,
+    radio_volume: f32,
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let guard = state.lock();
     Json(StatusResponse {
         is_recording: guard.recording.is_some(),
+        auto_record: state.auto_record,
         default_model: guard.default_model.clone(),
         replay_file: guard.replay.as_ref().map(|(path, _)| path.display().to_string()),
+        split_count: guard.splits.len(),
+        live_radio: state.live_radio.load(Ordering::Relaxed),
+        radio_volume: state.radio_volume(),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct SetModelRequest {
+    model: Option<String>,
+}
+
+/// Remembers the model picked in the UI, for runs that are recorded without a request.
+async fn set_model(State(state): State<Arc<AppState>>, Json(payload): Json<SetModelRequest>) -> impl IntoResponse {
+    let mut guard = state.lock();
+    guard.default_model = pick_model(payload.model, &guard.default_model);
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Debug, Serialize)]
@@ -192,4 +251,15 @@ async fn list_models() -> impl IntoResponse {
         Ok(Err(err)) => ModelsResponse { ollama: true, installed: Vec::new(), error: Some(err.to_string()) },
         Err(err) => ModelsResponse { ollama: true, installed: Vec::new(), error: Some(err.to_string()) },
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct SetRadioRequest {
+    enabled: bool,
+}
+
+/// Turns the spoken radio call after each lap on or off.
+async fn set_radio(State(state): State<Arc<AppState>>, Json(payload): Json<SetRadioRequest>) -> impl IntoResponse {
+    state.live_radio.store(payload.enabled, Ordering::Relaxed);
+    StatusCode::NO_CONTENT
 }

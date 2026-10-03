@@ -155,6 +155,12 @@ export const sectorOf = (lap, i) => (lap.sectors || [])[i];
 
 export const range = (n) => Array.from({ length: n }, (_, i) => i);
 
+/**
+ * Whether two laps were driven on a similar surface, so comparing them says something about the
+ * driving: track wetness at most one step apart. Same rule as `LapMetrics::same_conditions`.
+ */
+export const sameConditions = (a, b) => !a || !b || !isNum(a.track_wetness) || !isNum(b.track_wetness) || Math.abs(a.track_wetness - b.track_wetness) <= 1;
+
 /** Stats over "counted" laps: complete laps the driver hasn't excluded. */
 export function computeStats(laps, excluded) {
   const counted = laps.filter((lap) => lap.is_complete && !excluded.has(lap.lap_number));
@@ -164,9 +170,12 @@ export function computeStats(laps, excluded) {
   const best = fastest(counted);
   const avg = mean(times);
 
-  const nSectors = sectorCount(counted);
+  // The optimal lap and the focus sector mix sectors from different laps, so only laps on a
+  // surface like the best lap's go in: a wet sector says nothing about a dry lap.
+  const alike = counted.filter((lap) => sameConditions(lap, best));
+  const nSectors = sectorCount(alike);
   const bestSectors = range(nSectors).map((i) => {
-    const values = counted.map((lap) => sectorOf(lap, i)).filter(isNum);
+    const values = alike.map((lap) => sectorOf(lap, i)).filter(isNum);
     return values.length ? Math.min(...values) : null;
   });
   const optimal = nSectors && bestSectors.every(isNum) ? bestSectors.reduce((a, b) => a + b, 0) : null;
@@ -174,7 +183,7 @@ export function computeStats(laps, excluded) {
   // Where time goes on a typical lap: average gap to your own best in each sector.
   let focus = null;
   range(nSectors).forEach((i) => {
-    const values = counted.map((lap) => sectorOf(lap, i)).filter(isNum);
+    const values = alike.map((lap) => sectorOf(lap, i)).filter(isNum);
     if (!values.length) return;
     const loss = mean(values) - bestSectors[i];
     if (focus === null || loss > focus.loss) focus = { sector: i + 1, loss };

@@ -29,6 +29,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 4.0, help = "Playback speed for --replay (1 = real time)")]
     pub replay_speed: f64,
 
+    #[arg(long, help = "Don't start and save recordings automatically when you get in and out of the car")]
+    pub no_auto_record: bool,
+
     #[arg(
         long,
         value_name = "IBT",

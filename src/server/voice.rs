@@ -82,3 +82,43 @@ pub(super) async fn speak(
     .await?;
     result.map(|wav| ([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav))
 }
+
+/// Speaks `text` as a radio call on this PC at the current radio volume. Blocks until it has played.
+pub(super) fn speak_on_radio(state: &AppState, text: &str) -> anyhow::Result<()> {
+    let mut wav = crate::voice::radio::read_wav(&state.voice.speak_message(text, true)?)?;
+    crate::voice::radio::apply_volume(&mut wav, state.radio_volume());
+    crate::voice::playback::play_wav(&crate::voice::radio::write_wav(&wav))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SetVolumeRequest {
+    volume: f32,
+}
+
+/// Sets how loud the live radio calls are, and remembers it.
+pub(super) async fn set_radio_volume(State(state): State<Arc<AppState>>, Json(payload): Json<SetVolumeRequest>) -> impl IntoResponse {
+    let volume = super::settings::clamp_volume(payload.volume);
+    state.set_radio_volume(volume);
+    if let Err(err) = (super::settings::Settings { radio_volume: volume }).save() {
+        eprintln!("Could not save settings: {err}");
+    }
+    StatusCode::NO_CONTENT
+}
+
+const TEST_CALL: &str = "Radio check. 1:22.215, 0.13s quicker. Turn 5 is costing you 0.19s.";
+
+/// Plays a sample radio call at the current volume.
+pub(super) async fn test_radio(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
+    let result = blocking("Radio test", move || {
+        if !state.voice.is_available() {
+            return Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                state.voice.status().hint.unwrap_or_else(|| "No voice engine available.".into()),
+            ));
+        }
+        speak_on_radio(&state, TEST_CALL)
+            .map_err(|err| error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Radio test failed: {err:#}")))
+    })
+    .await?;
+    result.map(|()| StatusCode::NO_CONTENT)
+}

@@ -319,6 +319,9 @@ td.time-best { color: var(--purple); font-weight: 700; }
 .live-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .live-big { font-family: var(--mono); font-size: 28px; font-weight: 600; }
 .live-laps { display: flex; gap: 6px; flex-wrap: wrap; }
+.radio-calls { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+.radio-call { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.radio-call .n { font-size: 11px; font-weight: 600; color: var(--text-3); white-space: nowrap; }
 
 /* ---------- Empty, toast, modal ---------- */
 .empty { display: grid; place-items: center; text-align: center; padding: 70px 20px; gap: 14px; }
@@ -439,6 +442,7 @@ table.corners .dot { display: inline-block; width: 8px; height: 8px; border-radi
 .turn-badge:hover circle, .turn-badge.active circle, .turn-badge.hovered circle { fill: var(--accent); stroke: var(--accent); }
 .turn-badge:hover text, .turn-badge.active text, .turn-badge.hovered text { fill: #05131d; }
 .map-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); align-items: center; }
+.map-tools { display: flex; gap: 4px; justify-content: flex-end; align-items: center; margin-top: -4px; }
 .speed-scale { display: inline-block; width: 90px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #ff5f5f, #ffb547, #3ddc84); }
 .map-note { font-size: 12px; }
 
@@ -691,3 +695,20 @@ table.shift-table tbody tr { cursor: default; }
 .speak { font-size: 13px; line-height: 1; }
 .radio-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); cursor: pointer; user-select: none; }
 .radio-toggle input { margin: 0; accent-color: var(--accent); }
+
+/* Radio transcript tab */
+.radio-log { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.radio-log li { display: grid; grid-template-columns: 120px 1fr auto; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.radio-lap { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; background: none; border: none; color: var(--text); cursor: pointer; font: inherit; font-size: 12px; text-align: left; padding: 0; }
+.radio-lap:hover span:first-child { text-decoration: underline; }
+.radio-lap .mono { color: var(--text-2); }
+.radio-text { font-size: 14px; line-height: 1.45; }
+.radio-text .tag { margin-right: 6px; }
+@media (max-width: 560px) { .radio-log li { grid-template-columns: 1fr auto; } .radio-text { grid-column: 1 / -1; grid-row: 2; } }
+
+.radio-volume { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
+.radio-volume-row { display: flex; align-items: center; gap: 10px; }
+.radio-volume-row input[type="range"] { flex: 1; accent-color: var(--accent); }
+.radio-log li.pit, .radio-call.pit { border-color: var(--border-strong); background: var(--surface); }
+.radio-log li.pit .radio-lap span:first-child { font-weight: 600; }
+.radio-log li.pit .radio-lap { cursor: default; }

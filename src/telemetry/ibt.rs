@@ -96,6 +96,7 @@ fn parse_track_info(yaml: &str) -> TrackInfo {
 
     TrackInfo {
         track_name: get("TrackName"),
+        track_id: get("TrackID").parse().ok().filter(|id| *id > 0),
         display_name: get("TrackDisplayName"),
         config_name: get("TrackConfigName"),
         length_m,
@@ -214,6 +215,9 @@ fn fixture_yaml(original: &str, track: &TrackInfo) -> String {
     let raw = |key: &str| yaml_value(original, key, 0).map(|(v, _)| v.to_string()).unwrap_or_default();
     let mut yaml = String::from("---\nWeekendInfo:\n");
     yaml += &format!(" TrackName: {}\n", track.track_name);
+    if let Some(id) = track.track_id {
+        yaml += &format!(" TrackID: {id}\n");
+    }
     yaml += &format!(" TrackDisplayName: {}\n", track.display_name);
     yaml += &format!(" TrackConfigName: {}\n", track.config_name);
     yaml += &format!(" TrackLength: {}\n", raw("TrackLength"));

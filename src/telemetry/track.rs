@@ -14,6 +14,18 @@ use crate::telemetry::trace::{detect_turns, TrackInfo, Turn};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackMap {
     pub track_name: String,
+    /// iRacing's `TrackID`: with `track_name` it locates the official map, whose turn numbers
+    /// the UI copies.
+    #[serde(default)]
+    pub track_id: Option<u32>,
+    /// Where `turns` came from: "detected" (from the outline's curvature), "official"
+    /// (iRacing's map) or "manual" (edited by hand). Only detected turns are replaced
+    /// automatically.
+    #[serde(default = "detected")]
+    pub turns_source: String,
+    /// Clockwise rotation (degrees) the UI draws the map with, so it can match the sim's.
+    #[serde(default)]
+    pub rotation_deg: f64,
     pub length_m: f64,
     /// "gps" or "heading".
     pub source: String,
@@ -33,6 +45,10 @@ pub fn slug(name: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     slug.trim_matches('-').to_string()
+}
+
+fn detected() -> String {
+    "detected".to_string()
 }
 
 fn track_path(track_name: &str) -> Option<PathBuf> {
@@ -61,9 +77,8 @@ fn save(map: &TrackMap) {
     }
 }
 
-/// Replace a track's turn labels and persist them.
-pub fn update_turns(map: &mut TrackMap, turns: Vec<Turn>) {
-    map.turns = turns;
+/// Persist a map after its turns or view settings were changed.
+pub fn store(map: &TrackMap) {
     if !map.track_name.is_empty() {
         save(map);
     }
@@ -100,6 +115,10 @@ pub fn resolve(
                 saved.source = source.to_string();
                 changed = true;
             }
+            if saved.track_id.is_none() && track.track_id.is_some() {
+                saved.track_id = track.track_id;
+                changed = true;
+            }
             if saved.sector_pcts.len() < 2 && track.sector_pcts.len() > 1 {
                 saved.sector_pcts = track.sector_pcts.clone();
                 changed = true;
@@ -117,6 +136,9 @@ pub fn resolve(
             };
             let map = TrackMap {
                 track_name: track.track_name.clone(),
+                track_id: track.track_id,
+                turns_source: detected(),
+                rotation_deg: 0.0,
                 length_m,
                 source: source.to_string(),
                 sector_pcts: track.sector_pcts.clone(),

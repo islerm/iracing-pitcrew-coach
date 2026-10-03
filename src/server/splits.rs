@@ -22,7 +22,11 @@ use crate::{
         handling::{corner_notes, peak_combined_g},
         summarize_session, SessionSummary,
     },
-    coach::{ask_model, generate_feedback, prompt::corner_prompt},
+    coach::{
+        ask_model, generate_feedback,
+        prompt::corner_prompt,
+        radio_call::{transcript, LapCall, RadioEntry},
+    },
     telemetry::{
         ibt::read_ibt,
         track::{self, TrackMap},
@@ -79,7 +83,12 @@ pub(super) struct PracticeSplit {
     /// Behind a lock because renaming turns updates every run on the same track.
     track: Mutex<Option<TrackMap>>,
     summary: SessionSummary,
-    feedback: String,
+    /// The coach model's write-up, made the first time it's asked for (see `get_feedback`)
+    /// rather than when the run is saved: the model is slow and memory-hungry, and runs are
+    /// saved while the driver is still in the sim.
+    feedback: Mutex<Option<FeedbackResponse>>,
+    /// The pit engineer's call after each lap (see `radio_call::transcript`).
+    radio: Vec<RadioEntry>,
     /// Session peak combined g (98th percentile over all traces), the 100% mark for grip use.
     peak_g: Option<f64>,
 }
@@ -130,7 +139,8 @@ impl PracticeSplit {
             shift_rpm: self.run.shift_rpm,
             weather: self.summary.weather.clone(),
             suggestions: self.summary.suggestions.clone(),
-            feedback: self.feedback.clone(),
+            feedback: self.feedback.lock().expect("feedback lock poisoned").as_ref().map(|f| f.feedback.clone()),
+            radio: self.radio.clone(),
         }
     }
 }
@@ -165,7 +175,40 @@ pub(super) struct SplitDetailResponse {
     shift_rpm: Option<f64>,
     weather: Option<SessionWeather>,
     suggestions: Vec<String>,
+    /// `None` until requested through `POST /api/splits/:id/feedback`.
+    feedback: Option<String>,
+    radio: Vec<RadioEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct FeedbackRequest {
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct FeedbackResponse {
     feedback: String,
+    model: String,
+}
+
+/// The coach's write-up for a run, asking the model the first time and reusing it after.
+pub(super) async fn get_feedback(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<FeedbackRequest>,
+) -> ApiResult<FeedbackResponse> {
+    let split = state.split(&id)?;
+    if let Some(done) = split.feedback.lock().expect("feedback lock poisoned").clone() {
+        return Ok(Json(done));
+    }
+    let model = pick_model(payload.model, &split.model);
+    let done = blocking("Coach", move || {
+        let done = FeedbackResponse { feedback: generate_feedback(&split.summary, &model), model };
+        *split.feedback.lock().expect("feedback lock poisoned") = Some(done.clone());
+        done
+    })
+    .await?;
+    Ok(Json(done))
 }
 
 #[derive(Debug, Serialize)]
@@ -228,6 +271,14 @@ pub(super) struct ImportRequest {
 #[derive(Debug, Deserialize)]
 pub(super) struct UpdateTurnsRequest {
     turns: Vec<Turn>,
+    /// True when the labels were copied from iRacing's official map rather than edited by hand.
+    #[serde(default)]
+    official: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct UpdateRotationRequest {
+    rotation_deg: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,7 +310,13 @@ pub(super) struct ShiftsQuery {
 
 /// Summarizes the laps, asks the coach model for feedback (off the async runtime, since
 /// Ollama can take a while) and stores the result as a new split.
-pub(super) async fn finalize_split(state: &Arc<AppState>, run: NewRun, track: Option<TrackMap>, model: String) -> ApiResult<SplitDetailResponse> {
+pub(super) async fn finalize_split(
+    state: &Arc<AppState>,
+    run: NewRun,
+    track: Option<TrackMap>,
+    model: String,
+    live_calls: Vec<LapCall>,
+) -> ApiResult<SplitDetailResponse> {
     if run.laps.is_empty() {
         return Err(error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -277,16 +334,30 @@ pub(super) async fn finalize_split(state: &Arc<AppState>, run: NewRun, track: Op
         let mut summary = summarize_session(&run.laps);
         add_weather(&mut summary, run.weather.take(), &run.laps);
         if let Some(track) = &track {
-            add_corner_notes(&mut summary, corner_notes(&run.traces, &track.turns, track.length_m));
+            // The fastest lap against the best passes from laps on a similar surface only: a
+            // corner isn't "slow" because that pass was on a wet track.
+            let fastest = run.laps.iter().find(|l| l.lap_number == summary.fastest_lap);
+            let comparable: Vec<LapTrace> = run
+                .traces
+                .iter()
+                .filter(|t| {
+                    let lap = run.laps.iter().find(|l| l.lap_number == t.lap_number);
+                    matches!((fastest, lap), (Some(f), Some(l)) if f.same_conditions(l))
+                })
+                .cloned()
+                .collect();
+            add_corner_notes(&mut summary, corner_notes(&comparable, &track.turns, track.length_m));
         }
         // Early/late upshifts and rev-limiter time go to the coach and the "next time" list.
         let length_m = track.as_ref().map(|t| t.length_m).unwrap_or(0.0);
         let traces: Vec<&LapTrace> = run.traces.iter().collect();
         let shifts = shift_report(&traces, run.shift_rpm, run.redline_rpm, length_m);
         summary.suggestions.extend(shifts.notes.into_iter().filter(|n| !n.ends_with("are on time.")));
-        let feedback = generate_feedback(&summary, &model);
+        let feedback = Mutex::new(None);
         let peak_g = peak_combined_g(&run.traces);
-        Arc::new(PracticeSplit { id, ended_at_ms: epoch_ms_now(), model, run, track: Mutex::new(track), summary, feedback, peak_g })
+        let turns = track.as_ref().map(|t| t.turns.as_slice()).unwrap_or_default();
+        let radio = transcript(&run.laps, &run.traces, turns, length_m, &live_calls);
+        Arc::new(PracticeSplit { id, ended_at_ms: epoch_ms_now(), model, run, track: Mutex::new(track), summary, feedback, radio, peak_g })
     })
     .await?;
 
@@ -332,7 +403,7 @@ pub(super) async fn import_split(
     .map_err(|err| error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string()))?;
 
     let model = pick_model(payload.model, &state.lock().default_model);
-    finalize_split(&state, run, track, model).await
+    finalize_split(&state, run, track, model, Vec::new()).await
 }
 
 pub(super) async fn get_split_track(
@@ -354,25 +425,47 @@ pub(super) async fn update_track_turns(
         .map(|turn| Turn { label: turn.label.trim().chars().take(12).collect(), pct: turn.pct })
         .collect();
     turns.sort_by(|a, b| a.pct.partial_cmp(&b.pct).unwrap_or(std::cmp::Ordering::Equal));
+    let source = if payload.official { "official" } else { "manual" };
 
-    let target = state.split(&id)?;
+    update_shared_track(&state, &id, |map| {
+        map.turns = turns.clone();
+        map.turns_source = source.to_string();
+    })
+    .await
+}
+
+pub(super) async fn update_track_rotation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateRotationRequest>,
+) -> ApiResult<TrackMap> {
+    if !payload.rotation_deg.is_finite() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Rotation must be a number."));
+    }
+    let rotation_deg = payload.rotation_deg.rem_euclid(360.0);
+    update_shared_track(&state, &id, |map| map.rotation_deg = rotation_deg).await
+}
+
+/// Applies `change` to the split's track map and every other run's map of the same track
+/// (they share the saved file), then saves it.
+async fn update_shared_track(state: &Arc<AppState>, id: &str, change: impl Fn(&mut TrackMap)) -> ApiResult<TrackMap> {
+    let target = state.split(id)?;
     let track_name = target.require_track()?.track_name;
     let splits = state.lock().splits.clone();
-    // Other runs on the same track share the saved labels.
     let mut updated = None;
     for split in &splits {
         let mut guard = split.track.lock().expect("track lock poisoned");
         if let Some(map) = guard.as_mut().filter(|map| map.track_name == track_name) {
-            map.turns = turns.clone();
+            change(map);
             if split.id == id {
                 updated = Some(map.clone());
             }
         }
     }
-    let mut map = updated.ok_or_else(|| error_response(StatusCode::NOT_FOUND, NO_TRACK))?;
-    // Persist the labels (file IO) with no lock held.
-    let map = blocking("Saving turns", move || {
-        track::update_turns(&mut map, turns);
+    let map = updated.ok_or_else(|| error_response(StatusCode::NOT_FOUND, NO_TRACK))?;
+    // Persist (file IO) with no lock held.
+    let map = blocking("Saving track", move || {
+        track::store(&map);
         map
     })
     .await?;
@@ -441,7 +534,15 @@ pub(super) async fn analyze_corner(
     let CornerRequest { lap, ref_lap, exclude, coach, .. } = payload;
 
     let report = blocking("Corner analysis", move || {
-        let keep = |n: i32| n == lap || Some(n) == ref_lap || !exclude.contains(&n);
+        // The typical-lap baseline and the rankings only use laps on a similar surface to the
+        // one analysed (a lap the driver picked to compare with is always kept).
+        let laps = &split.run.laps;
+        let analysed = laps.iter().find(|l| l.lap_number == lap);
+        let similar = |n: i32| match (analysed, laps.iter().find(|l| l.lap_number == n)) {
+            (Some(a), Some(b)) => a.same_conditions(b),
+            _ => true,
+        };
+        let keep = |n: i32| n == lap || Some(n) == ref_lap || (!exclude.contains(&n) && similar(n));
         let traces: Vec<&LapTrace> = split.run.traces.iter().filter(|t| keep(t.lap_number)).collect();
         corner_report(&traces, &track.turns, track.length_m, split.peak_g, turn, lap, ref_lap)
     })

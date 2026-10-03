@@ -22,7 +22,9 @@ fn main() -> Result<()> {
     // Resolve before a possible change of directory below.
     let replay = cli.replay.map(|path| std::path::absolute(path).map(|path| (path, cli.replay_speed))).transpose()?;
     enter_project_root()?;
-    server::run_ui_server(cli.ui_port, cli.model, replay, cli.tts, cli.voice)
+    // A replay only plays back when asked to, so it can't start itself.
+    let auto_record = !cli.no_auto_record && replay.is_none();
+    server::run_ui_server(cli.ui_port, cli.model, replay, auto_record, cli.tts, cli.voice)
 }
 
 /// The UI, voice scripts and data folders are found relative to the working directory. When

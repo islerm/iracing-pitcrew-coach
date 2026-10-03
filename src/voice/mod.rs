@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
+pub mod playback;
 pub mod radio;
 pub mod speech;
 
@@ -237,6 +238,22 @@ impl VoiceEngine {
             let gap = (wav.sample_rate as f32 * SENTENCE_GAP_S) as usize;
             wav.samples.extend(std::iter::repeat_n(0.0f32, gap));
         }
+        Ok(write_wav(&wav))
+    }
+
+    /// A whole message as one WAV: every part from `plan`, in order, as one transmission.
+    pub fn speak_message(&self, text: &str, radio: bool) -> Result<Vec<u8>> {
+        let parts = self.plan(text);
+        let mut joined: Option<Wav> = None;
+        for (i, part) in parts.iter().enumerate() {
+            let transmission = Transmission { first: i == 0, last: i + 1 == parts.len() };
+            let wav = read_wav(&self.speak_part(part, radio, transmission)?)?;
+            match &mut joined {
+                None => joined = Some(wav),
+                Some(all) => all.samples.extend(wav.samples),
+            }
+        }
+        let wav = joined.ok_or_else(|| anyhow!("Nothing to say."))?;
         Ok(write_wav(&wav))
     }
 

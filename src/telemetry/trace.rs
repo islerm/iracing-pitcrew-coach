@@ -130,6 +130,8 @@ impl Default for Frame {
 pub struct TrackInfo {
     /// iRacing's internal id, e.g. "roadatlanta full". Used as the key for saved track maps.
     pub track_name: String,
+    /// iRacing's numeric `TrackID`, which locates the official track map.
+    pub track_id: Option<u32>,
     pub display_name: String,
     pub config_name: String,
     pub length_m: f64,
@@ -219,6 +221,18 @@ pub struct LapMetrics {
     pub top_speed_kph: Option<f64>,
     pub full_throttle_pct: Option<f64>,
     pub braking_pct: Option<f64>,
+}
+
+impl LapMetrics {
+    /// Whether two laps were driven on a similar track surface, so their times say something
+    /// about the driving: track wetness at most one step apart (dry and mostly dry compare,
+    /// dry and very lightly wet don't). Laps with no wetness data compare with anything.
+    pub fn same_conditions(&self, other: &LapMetrics) -> bool {
+        match (self.track_wetness, other.track_wetness) {
+            (Some(a), Some(b)) => a.abs_diff(b) <= 1,
+            _ => true,
+        }
+    }
 }
 
 pub struct RunData {
@@ -823,6 +837,29 @@ mod tests {
 
     /// Anonymized Road Atlanta session made with `--make-fixture` (4 timed laps).
     const FIXTURE: &str = "tests/fixtures/roadatlanta-full.ibt";
+
+    #[test]
+    fn laps_compare_only_in_similar_conditions() {
+        let lap = |track_wetness: Option<u8>| LapMetrics {
+            lap_number: 1,
+            lap_time_s: 90.0,
+            is_complete: true,
+            sectors: Vec::new(),
+            avg_speed_kph: None,
+            off_track_pcts: Vec::new(),
+            incidents: None,
+            air_temp_c: None,
+            track_temp_c: None,
+            track_wetness,
+            top_speed_kph: None,
+            full_throttle_pct: None,
+            braking_pct: None,
+        };
+        assert!(lap(Some(1)).same_conditions(&lap(Some(2))));
+        assert!(!lap(Some(1)).same_conditions(&lap(Some(3))));
+        assert!(!lap(Some(5)).same_conditions(&lap(Some(1))));
+        assert!(lap(None).same_conditions(&lap(Some(6))));
+    }
 
     /// RMS distance (m) between the GPS outline and the heading-only outline that live
     /// mode has to use, for the same frames.

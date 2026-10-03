@@ -274,9 +274,68 @@ pub fn radio_filter(input: &Wav, part: Transmission) -> Wav {
     Wav { sample_rate: input.sample_rate, samples: out }
 }
 
+/// Scales a clip by `volume` (a multiplier). Above 1.0 it is made louder without hard clipping: a
+/// tanh soft-limiter with small-signal gain of about `volume` whose loudest sample lands on 0.97.
+pub fn apply_volume(wav: &mut Wav, volume: f32) {
+    const CEILING: f32 = 0.97;
+    let peak = wav.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak <= 0.0 || !volume.is_finite() {
+        return;
+    }
+    if volume <= 1.0 || volume * peak <= CEILING {
+        for s in &mut wav.samples {
+            *s *= volume;
+        }
+        return;
+    }
+    let g = volume / CEILING;
+    let norm = CEILING / (g * peak).tanh();
+    for s in &mut wav.samples {
+        *s = norm * (g * *s).tanh();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rms(wav: &Wav) -> f32 {
+        (wav.samples.iter().map(|s| s * s).sum::<f32>() / wav.samples.len() as f32).sqrt()
+    }
+
+    fn peak(wav: &Wav) -> f32 {
+        wav.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn volume_one_is_a_no_op() {
+        let wav = sine(24_000, 440.0, 0.1);
+        let mut out = wav.clone();
+        apply_volume(&mut out, 1.0);
+        assert!(wav.samples.iter().zip(&out.samples).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn volume_below_one_scales() {
+        let wav = sine(24_000, 440.0, 0.1);
+        let mut out = wav.clone();
+        apply_volume(&mut out, 0.5);
+        assert!(wav.samples.iter().zip(&out.samples).all(|(a, b)| (a * 0.5 - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn volume_above_one_is_louder_without_clipping() {
+        let wav = sine(24_000, 440.0, 0.1);
+        let mut out = wav.clone();
+        apply_volume(&mut out, 2.0);
+        assert!(peak(&out) <= 0.97 + 1e-6);
+        assert!(rms(&out) > rms(&wav) * 1.6);
+        // A clip already near full scale gets denser, never past the ceiling.
+        let mut hot = wav.clone();
+        hot.samples.iter_mut().for_each(|s| *s *= 1.78);
+        apply_volume(&mut hot, 3.0);
+        assert!(peak(&hot) <= 0.97 + 1e-6);
+    }
 
     fn sine(sr: u32, freq: f32, secs: f32) -> Wav {
         let n = (sr as f32 * secs) as usize;

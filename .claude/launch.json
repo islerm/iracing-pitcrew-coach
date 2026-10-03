@@ -12,6 +12,12 @@
       "runtimeExecutable": "cargo",
       "runtimeArgs": ["run", "--release", "--", "--ui-port", "8790", "--replay", "tests/fixtures/roadatlanta-full.ibt", "--replay-speed", "8"],
       "port": 8790
+    },
+    {
+      "name": "pitcrew-ui-test",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "--release", "--", "--ui-port", "8791", "--no-auto-record", "--model", "no-such-model"],
+      "port": 8791
     }
   ]
 }

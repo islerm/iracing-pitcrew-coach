@@ -1,8 +1,9 @@
-import { Kpi, OffTrackMark, SKY_ICON, Segmented, WETNESS, api, computeStats, deltaClass, fastest, fmtDelta, fmtLap, fmtNum, fmtTempRange, fmtTimeOfDay, html, isNum, lapWeatherTitle, offTrackTitle, offTracks, post, range, rangeTitle, sectorOf, trackTempSpan, useCallback, useContext, useEffect, useMemo, useRef, useState, useStored } from "./lib.js";
+import { Kpi, OffTrackMark, SKY_ICON, Segmented, WETNESS, api, computeStats, deltaClass, fastest, fmtDelta, fmtLap, fmtNum, fmtTempRange, fmtTimeOfDay, html, isNum, lapWeatherTitle, offTrackTitle, offTracks, post, range, rangeTitle, sameConditions, sectorOf, trackTempSpan, useCallback, useContext, useEffect, useMemo, useRef, useState, useStored } from "./lib.js";
 import { MapRef, MiniMap, TrackMapView, TurnContext, TurnScope, TurnText, gearColor, ghostPct, idxOf, mapIndex, turnIndex } from "./trackmap.js";
 import { GripCircle, PaceChart, TraceChart } from "./charts.js";
 import { CornerCoach, CornerTable, ShiftsCard } from "./corners.js";
 import { RadioToggle, SpeakButton } from "./voice.js";
+import { officialTurns, rotatedMap } from "./officialmap.js";
 
 export function runTitle(split) {
   if (split.track_label) return split.track_label;
@@ -350,6 +351,38 @@ function TrackSection({ split, laps, selected, refNumber, excludedList, model, m
     return () => observer.disconnect();
   }, [hasMapBox]);
 
+  const [syncing, setSyncing] = useState(false);
+
+  // Clicks can come faster than the server answers, so count from the last requested angle.
+  const rotationRef = useRef(0);
+  useEffect(() => {
+    if (map) rotationRef.current = map.rotation_deg || 0;
+  }, [map && map.rotation_deg]);
+
+  async function rotate(by) {
+    rotationRef.current = (rotationRef.current + by + 360) % 360;
+    try {
+      setMap(await post(`/api/splits/${split.id}/track/rotation`, { rotation_deg: rotationRef.current }));
+    } catch (err) {
+      window.alert(err.message);
+    }
+  }
+
+  async function syncOfficial() {
+    if (map.turns_source === "manual" && !window.confirm("Replace your edited turn labels with iRacing's turn numbers?")) return;
+    setSyncing(true);
+    try {
+      // `map` is drawn rotated already, so the fit's rotation is on top of that.
+      const official = await officialTurns(map);
+      await post(`/api/splits/${split.id}/track/rotation`, { rotation_deg: (map.rotation_deg || 0) + official.rotation_deg });
+      setMap(await post(`/api/splits/${split.id}/track/turns`, { turns: official.turns, official: true }));
+    } catch (err) {
+      window.alert(`Couldn't use iRacing's map: ${err.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   async function saveLabels() {
     try {
       const turns = map.turns.map((t, i) => ({ pct: t.pct, label: (labels[i] || "").trim() || t.label }));
@@ -439,6 +472,18 @@ function TrackSection({ split, laps, selected, refNumber, excludedList, model, m
                 selOff=${selLap && selLap.off_track_pcts}
                 refOff=${ref && refLap ? refLap.off_track_pcts : null}
               />
+              <div className="map-tools">
+                <button className="btn btn-ghost btn-icon btn-sm" title="Rotate the map 90° anticlockwise" aria-label="Rotate map anticlockwise" onClick=${() => rotate(-90)}>⟲</button>
+                <button className="btn btn-ghost btn-icon btn-sm" title="Rotate the map 90° clockwise" aria-label="Rotate map clockwise" onClick=${() => rotate(90)}>⟳</button>
+                ${map.track_id
+                  ? html`<button
+                      className="btn btn-ghost btn-sm"
+                      disabled=${syncing}
+                      title=${map.turns_source === "official" ? "Turn numbers and layout come from iRacing's track map. Click to fetch them again." : "Use iRacing's turn numbers and map layout"}
+                      onClick=${syncOfficial}
+                    >${syncing ? html`<span className="spinner"></span>` : map.turns_source === "official" ? "✓ iRacing turns" : "Use iRacing turns"}</button>`
+                  : null}
+              </div>
               </div>
               <div className="map-legend">
                 ${mapMode === "delta"
@@ -733,6 +778,117 @@ function LapDetail({ laps, stats, selected, compare, refNumber }) {
 
 // ---------- Run view ----------
 
+/**
+ * The coach model's write-up. It's made on request rather than when the run is saved (the model
+ * is slow and takes a lot of memory): automatically on opening the run, unless a recording is
+ * running, so the model never loads while you're driving.
+ */
+function CoachFeedback({ split, model }) {
+  const [done, setDone] = useState(() => (split.feedback ? { feedback: split.feedback, model: split.model } : null));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function ask() {
+    setLoading(true);
+    setError(null);
+    try {
+      setDone(await post(`/api/splits/${split.id}/feedback`, { model: model || null }));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (done) return undefined;
+    let cancelled = false;
+    api("/api/status")
+      .then((status) => {
+        if (!cancelled && !status.is_recording) ask();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [split.id]);
+
+  return html`<section className="card">
+    <div className="card-head">
+      <div className="card-title">Coach feedback</div>
+      <span className="head-actions">
+        ${done
+          ? html`<${RadioToggle} />
+              <${SpeakButton} text=${done.feedback} label="Hear the coach feedback" />`
+          : null}
+        <span className="tag">${done ? done.model : model || split.model}</span>
+      </span>
+    </div>
+    ${done
+      ? html`<p className="feedback"><${TurnText} text=${done.feedback} /></p>`
+      : loading
+        ? html`<p className="muted"><span className="spinner"></span> The coach is writing this up…</p>`
+        : html`<div>
+            <p className=${error ? "bad" : "muted"} style=${{ marginBottom: "8px" }}>
+              ${error || "The coach writes this up when you ask, so the model isn't loaded while you're driving."}
+            </p>
+            <button className="btn btn-sm" onClick=${ask}>Ask the coach</button>
+          </div>`}
+  </section>`;
+}
+
+/** The pit engineer's call after each lap, oldest first; click a lap to analyse it. */
+function RadioTranscript({ entries, laps, onOpenLap }) {
+  const lapOf = (n) => laps.find((l) => l.lap_number === n);
+  const all = entries.map((e) => `Lap ${e.lap_number}. ${e.text}`).join("\n");
+  const anyAfter = entries.some((e) => !e.live);
+  return html`<section className="card">
+    <div className="card-head">
+      <div className="card-title">Radio transcript</div>
+      ${entries.length
+        ? html`<span className="head-actions">
+            <${RadioToggle} />
+            <${SpeakButton} text=${all} label="Hear the whole transcript" />
+          </span>`
+        : null}
+    </div>
+    ${entries.length === 0
+      ? html`<p className="muted">No radio calls for this run: it has no laps the engineer could talk about.</p>`
+      : html`<ol className="radio-log">
+          ${entries.map((e) => {
+            const lap = lapOf(e.lap_number);
+            if (e.kind === "pit") {
+              return html`<li key=${e.lap_number + "pit"} className="pit">
+                <div className="radio-lap"><span>Pit debrief</span><span className="mono">after L${e.lap_number}</span></div>
+                <div className="radio-text">
+                  ${e.live ? html`<span className="tag tag-live" title="Said over the radio during the run">📻 live</span>` : null}
+                  <${TurnText} text=${e.text} />
+                </div>
+                <${SpeakButton} text=${e.text} label="Hear the debrief" />
+              </li>`;
+            }
+            return html`<li key=${e.lap_number + "lap"}>
+              <button className="radio-lap" onClick=${() => onOpenLap(e.lap_number)} title=${`Analyse lap ${e.lap_number}`}>
+                <span>L${e.lap_number}</span>
+                <span className="mono">${lap ? fmtLap(lap.lap_time_s) : ""}</span>
+                <${OffTrackMark} lap=${lap} />
+              </button>
+              <div className="radio-text">
+                ${e.live ? html`<span className="tag tag-live" title="Said over the radio during the run">📻 live</span>` : null}
+                <${TurnText} text=${e.text} />
+              </div>
+              <${SpeakButton} text=${e.text} label="Hear this call" />
+            </li>`;
+          })}
+        </ol>`}
+    ${anyAfter
+      ? html`<p className="faint fs-12">
+          Calls without the 📻 tag were worked out after the run: what the engineer would have said at the time, from the laps driven up to then.
+        </p>`
+      : null}
+  </section>`;
+}
+
 export function RunView({ split, laps, model }) {
   const [excluded, setExcluded] = useState(() => new Set());
   const [selected, setSelected] = useState(null);
@@ -744,10 +900,33 @@ export function RunView({ split, laps, model }) {
   const [mapError, setMapError] = useState(null);
   const [focus, setFocus] = useState(null);
   const [mainMapVisible, setMainMapVisible] = useState(false);
+  const [tab, setTab] = useStored("pcc.runTab", "analysis");
   useEffect(() => {
     if (!split.has_track) return;
-    api(`/api/splits/${split.id}/track`).then(setMap).catch((err) => setMapError(err.message));
+    let cancelled = false;
+    api(`/api/splits/${split.id}/track`)
+      .then(async (loaded) => {
+        if (cancelled) return;
+        setMap(loaded);
+        // First time on a track: swap the detected corners for iRacing's own turn numbers,
+        // and draw the map the way iRacing does.
+        if (loaded.turns_source !== "detected" || !loaded.track_id) return;
+        try {
+          const official = await officialTurns(loaded);
+          await post(`/api/splits/${split.id}/track/rotation`, { rotation_deg: official.rotation_deg });
+          const updated = await post(`/api/splits/${split.id}/track/turns`, { turns: official.turns, official: true });
+          if (!cancelled) setMap(updated);
+        } catch (err) {
+          console.warn("Official turn numbers unavailable:", err.message);
+        }
+      })
+      .catch((err) => setMapError(err.message));
+    return () => {
+      cancelled = true;
+    };
   }, [split.id]);
+  // Drawn turned to match iRacing's map; lap fractions (and so turns) are unaffected.
+  const viewMap = useMemo(() => map && rotatedMap(map), [map]);
   const turnBase = useMemo(
     () =>
       map && {
@@ -768,15 +947,15 @@ export function RunView({ split, laps, model }) {
   const stats = useMemo(() => computeStats(laps, excluded), [laps, excluded]);
   const excludedList = useMemo(() => [...excluded].sort((a, b) => a - b), [excluded]);
 
-  // Reference lap: the one picked with Shift+click, otherwise your best — or your
-  // next-best when the best lap is the one selected.
+  // Reference lap: the one picked with Shift+click, otherwise your best lap on a similar surface
+  // (a dry lap isn't measured against a wet one) — or the next-best when that's the one selected.
   const autoRef = useMemo(() => {
     if (!stats) return null;
-    if (stats.best.lap_number !== selected) return stats.best.lap_number;
-    const others = stats.counted.filter((l) => l.lap_number !== selected);
-    const next = fastest(others);
-    return next ? next.lap_number : null;
-  }, [stats, selected]);
+    const selLap = laps.find((l) => l.lap_number === selected);
+    const others = stats.counted.filter((l) => l.lap_number !== selected && sameConditions(l, selLap));
+    const best = fastest(others);
+    return best ? best.lap_number : null;
+  }, [stats, selected, laps]);
   const refNumber = compare !== null ? compare : autoRef;
 
   // Picking the comparison lap as the analysed lap swaps them rather than comparing a lap with itself.
@@ -843,6 +1022,12 @@ export function RunView({ split, laps, model }) {
     .filter(Boolean)
     .join(" · ");
 
+  const radio = split.radio || [];
+  const openLap = (n) => {
+    selectLap(n);
+    setTab("analysis");
+  };
+
   return html`<${TurnScope} base=${turnBase}>
     <div className="page-head">
       <div>
@@ -850,8 +1035,20 @@ export function RunView({ split, laps, model }) {
         <p>${subtitle}</p>
         <${WeatherStrip} weather=${split.weather} />
       </div>
+      <${Segmented}
+        label="View"
+        value=${tab}
+        onChange=${setTab}
+        options=${[
+          { value: "analysis", label: "Analysis" },
+          { value: "radio", label: `Radio${radio.length ? ` · ${radio.length}` : ""}` },
+        ]}
+      />
     </div>
 
+    ${tab === "radio"
+      ? html`<${RadioTranscript} entries=${radio} laps=${laps} onOpenLap=${openLap} />`
+      : html`<${React.Fragment}>
     <${LapBar}
       laps=${laps}
       stats=${stats}
@@ -926,7 +1123,7 @@ export function RunView({ split, laps, model }) {
       refNumber=${refNumber}
       excludedList=${excludedList}
       model=${model}
-      map=${map}
+      map=${viewMap}
       setMap=${setMap}
       mapError=${mapError}
       focus=${focus}
@@ -954,19 +1151,12 @@ export function RunView({ split, laps, model }) {
           ${split.suggestions.map((t, i) => html`<li key=${i}><b>${i + 1}</b><span><${TurnText} text=${t} /></span></li>`)}
         </ol>
       </section>
-      <section className="card">
-        <div className="card-head">
-          <div className="card-title">Coach feedback</div>
-          <span className="head-actions">
-            <${RadioToggle} />
-            <${SpeakButton} text=${split.feedback} label="Hear the coach feedback" />
-            <span className="tag">${split.model}</span>
-          </span>
-        </div>
-        <p className="feedback"><${TurnText} text=${split.feedback} /></p>
-      </section>
+      <${CoachFeedback} split=${split} model=${model} />
     </div>
+    <//>`}
 
-    ${turnBase && (turnBase.turns.length || turnBase.sectors.length) ? html`<${MiniMap} map=${map} title=${split.track_label} hidden=${mainMapVisible} />` : null}
+    ${turnBase && (turnBase.turns.length || turnBase.sectors.length)
+      ? html`<${MiniMap} map=${viewMap} title=${split.track_label} hidden=${tab === "analysis" && mainMapVisible} />`
+      : null}
   <//>`;
 }

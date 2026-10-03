@@ -218,7 +218,42 @@ function ModelPicker({ model, setModel, disabled }) {
   </div>`;
 }
 
-function TopBar({ isRecording, recordingStartedAt, replayFile, busy, model, setModel, onStart, onStop, onImport }) {
+function RadioVolume({ initial, notify }) {
+  const [pct, setPct] = useState(Math.round((initial || 1) * 100));
+  const [testing, setTesting] = useState(false);
+  const touched = useRef(false);
+  useEffect(() => {
+    if (!touched.current && initial) setPct(Math.round(initial * 100));
+  }, [initial]);
+  const save = (value) => post("/api/radio/volume", { volume: value / 100 }).catch((err) => notify("error", err.message));
+  const test = async () => {
+    setTesting(true);
+    try {
+      await post("/api/radio/test", {});
+    } catch (err) {
+      notify("error", err.message);
+    } finally {
+      setTesting(false);
+    }
+  };
+  return html`<div className="radio-volume">
+    <div className="model-picker-head">
+      <span className="model-picker-title">Radio volume</span>
+      <span className="mono fs-12">${pct}%</span>
+    </div>
+    <div className="radio-volume-row">
+      <input type="range" min="50" max="300" step="10" value=${pct} aria-label="Radio volume"
+        onInput=${(e) => { touched.current = true; setPct(Number(e.target.value)); }}
+        onChange=${(e) => save(Number(e.target.value))} />
+      <button className="btn btn-ghost btn-sm" onClick=${test} disabled=${testing}>
+        ${testing ? html`<span className="spinner"></span>` : "Test"}
+      </button>
+    </div>
+    <p className="faint fs-12">Volume of the engineer's radio calls on this PC. Windows' volume mixer also has a separate slider for this app.</p>
+  </div>`;
+}
+
+function TopBar({ isRecording, isAuto, autoRecord, recordingStartedAt, replayFile, busy, model, setModel, radioVolume, notify, onStart, onStop, onImport }) {
   const [now, setNow] = useState(Date.now());
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -236,15 +271,20 @@ function TopBar({ isRecording, recordingStartedAt, replayFile, busy, model, setM
     <div className="topbar-spacer"></div>
     ${isRecording && recordingStartedAt
       ? html`<span className="rec-pill" title=${replayFile ? "Replaying " + replayFile : ""}>
-          <span className="rec-dot"></span>${replayFile ? "REPLAY" : "REC"} <span className="mono">${fmtClock(now - recordingStartedAt)}</span>
+          <span className="rec-dot"></span>${replayFile ? "REPLAY" : isAuto ? "AUTO REC" : "REC"} <span className="mono">${fmtClock(now - recordingStartedAt)}</span>
         </span>`
-      : null}
+      : autoRecord
+        ? html`<span className="faint fs-12" title="Recording starts when you get in the car and is saved a few seconds after you get out">
+            Auto-record on · waiting for iRacing
+          </span>`
+        : null}
     <button className="btn btn-ghost" onClick=${onImport} disabled=${busy}>Open session</button>
     <div className="rel">
       <button className="btn btn-ghost btn-icon" title="Settings" aria-label="Settings" onClick=${() => setSettingsOpen(!settingsOpen)}>⚙</button>
       ${settingsOpen
         ? html`<div className="popover">
             <${ModelPicker} model=${model} setModel=${setModel} disabled=${isRecording} />
+            <${RadioVolume} initial=${radioVolume} notify=${notify} />
           </div>`
         : null}
     </div>
@@ -299,8 +339,9 @@ function Sidebar({ splits, selectedId, onSelect, onDelete }) {
 
 // ---------- Live panel ----------
 
-function LivePanel({ live }) {
+function LivePanel({ live, radioOn, onRadioToggle }) {
   const laps = (live && live.laps) || [];
+  const calls = ((live && live.radio_calls) || []).slice(-5).reverse();
   const complete = laps.filter((lap) => lap.is_complete);
   const best = fastest(complete);
   const last = laps.length ? laps[laps.length - 1] : null;
@@ -310,6 +351,10 @@ function LivePanel({ live }) {
   return html`<section className="card live">
     <div className="card-head">
       <div className="card-title">Live run</div>
+      <label className="radio-toggle">
+        <input type="checkbox" checked=${!!radioOn} onChange=${(e) => onRadioToggle(e.target.checked)} />
+        Radio calls
+      </label>
       <span className="faint fs-12">Laps appear as you cross the line</span>
     </div>
     <div className="live-grid">
@@ -337,7 +382,9 @@ function LivePanel({ live }) {
       </div>
     </div>
     ${live && live.capture_ended
-      ? live.is_replay
+      ? live.is_auto
+        ? html`<p className="muted" style=${{ marginBottom: "10px" }}>You're out of the car — saving the run…</p>`
+        : live.is_replay
         ? html`<p className="muted" style=${{ marginBottom: "10px" }}>Replay finished — click <b>Stop & analyze</b>.</p>`
         : html`<p className="bad" style=${{ marginBottom: "10px" }}>
             Telemetry capture stopped — iRacing may not be running. Click <b>Stop & analyze</b> to see the details.
@@ -358,20 +405,31 @@ function LivePanel({ live }) {
             </div>`;
           })}
         </div>`}
+    ${calls.length
+      ? html`<div className="radio-calls">
+          ${calls.map((call) => html`<div key=${call.lap_number + call.kind} className=${"radio-call" + (call.kind === "pit" ? " pit" : "")}>
+            <span className="n">${call.kind === "pit" ? "📻 Pit debrief" : `📻 L${call.lap_number}`}</span>
+            <span className="txt">${call.text}</span>
+          </div>`)}
+        </div>`
+      : null}
   </section>`;
 }
 
 // ---------- Empty state ----------
 
-function EmptyState({ onStart, onOpen, busy }) {
+function EmptyState({ onStart, onOpen, busy, autoRecord }) {
   return html`<section className="empty">
     <div className="empty-icon">🏁</div>
     <h2>Ready when you are</h2>
     <p>Record a stint live, or open an iRacing telemetry file to get lap times, a track map and corner-by-corner comparisons.</p>
     <div className="steps">
       <div className="step"><b>1</b>Get on track in iRacing</div>
-      <div className="step"><b>2</b>Start recording</div>
-      <div className="step"><b>3</b>Stop & review</div>
+      ${autoRecord
+        ? html`<div className="step"><b>2</b>Recording starts by itself</div>
+            <div className="step"><b>3</b>Get out of the car & review</div>`
+        : html`<div className="step"><b>2</b>Start recording</div>
+            <div className="step"><b>3</b>Stop & review</div>`}
     </div>
     <div style=${{ display: "flex", gap: "8px", marginTop: "6px" }}>
       <button className="btn btn-record" onClick=${onStart} disabled=${busy}><span className="rec-dot"></span> Start recording</button>
@@ -397,9 +455,12 @@ function App() {
   selectedIdRef.current = selectedId;
 
   const notify = (kind, text) => setToast({ kind, text });
+  // The server needs the model too, for runs the auto-recorder saves on its own.
+  const shareModel = (value) => post("/api/model", { model: value || null }).catch(() => {});
   const setModel = (value) => {
     setModelState(value);
     store("pcc.model", value);
+    shareModel(value);
   };
 
   async function refresh() {
@@ -415,11 +476,40 @@ function App() {
     if (!selectedIdRef.current && newSplits && newSplits.length) {
       setSelectedId(newSplits[newSplits.length - 1].id);
     }
+    return newSplits;
   }
 
   useEffect(() => {
+    if (model) shareModel(model);
     refresh().catch((err) => notify("error", err.message));
   }, []);
+
+  // Recordings can start and finish without a click (auto-record), so keep an eye on the
+  // server and catch up when something changed.
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  useEffect(() => {
+    const id = setInterval(async () => {
+      if (busy) return;
+      const prev = statusRef.current;
+      const next = await api("/api/status").catch(() => null);
+      if (!next || (next.is_recording === prev.is_recording && next.split_count === prev.split_count)) return;
+      const newSplits = await refresh().catch(() => null);
+      if (!prev.is_recording && next.is_recording) {
+        notify("ok", "You're on track — recording started.");
+      } else if (prev.is_recording && !next.is_recording && next.split_count > prev.split_count && newSplits && newSplits.length) {
+        setSelectedId(newSplits[newSplits.length - 1].id);
+        notify("ok", "Run saved and analyzed.");
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, [busy]);
+
+  const onRadioToggle = async (enabled) => {
+    setStatus((prev) => ({ ...prev, live_radio: enabled }));
+    await post("/api/radio", { enabled }).catch(() => {});
+    api("/api/status").then(setStatus).catch(() => {});
+  };
 
   // Poll live laps while recording.
   useEffect(() => {
@@ -508,11 +598,15 @@ function App() {
   return html`<div className="shell">
     <${TopBar}
       isRecording=${status.is_recording}
+      isAuto=${live && live.is_auto}
+      autoRecord=${status.auto_record}
       recordingStartedAt=${live && live.started_at_ms}
       replayFile=${status.replay_file}
       busy=${busy}
       model=${model}
       setModel=${setModel}
+      radioVolume=${status.radio_volume}
+      notify=${notify}
       onStart=${onStart}
       onStop=${onStop}
       onImport=${() => setImportOpen(true)}
@@ -520,11 +614,11 @@ function App() {
     <div className="body">
       <${Sidebar} splits=${splits} selectedId=${selectedId} onSelect=${setSelectedId} onDelete=${onDelete} />
       <main className="main">
-        ${status.is_recording ? html`<${LivePanel} live=${live} />` : null}
+        ${status.is_recording ? html`<${LivePanel} live=${live} radioOn=${status.live_radio} onRadioToggle=${onRadioToggle} />` : null}
         ${showRun
           ? html`<${RunView} key=${split.id} split=${split} laps=${laps} model=${model} />`
           : splits.length === 0 && !status.is_recording
-            ? html`<${EmptyState} onStart=${onStart} onOpen=${() => setImportOpen(true)} busy=${busy} />`
+            ? html`<${EmptyState} autoRecord=${status.auto_record} onStart=${onStart} onOpen=${() => setImportOpen(true)} busy=${busy} />`
             : null}
       </main>
     </div>

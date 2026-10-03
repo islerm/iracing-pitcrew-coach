@@ -34,7 +34,21 @@ pub struct PhaseStats {
     pub grip_pct: Option<f64>,
     /// Gear at the slowest point.
     pub apex_gear: i8,
+    /// Metres from the turn's apex marker to where the car was slowest (negative = before it):
+    /// where this lap actually apexed.
+    pub min_speed_at_m: f64,
+    /// Metres before the apex where the brake came off (below 5%) after the braking for this
+    /// corner; negative when it was trailed past the apex.
+    pub brake_release_m: Option<f64>,
+    /// Lateral g around the slowest point, and the radius of the car's path there (v²/a): at
+    /// the same grip, a tighter line means a lower apex speed. `None` without accelerometer
+    /// data, or where the corner is barely a bend.
+    pub apex_lat_g: Option<f64>,
+    pub apex_radius_m: Option<f64>,
 }
+
+/// Below this lateral g around the slowest point, the path radius is mostly noise.
+const MIN_APEX_LAT_G: f64 = 0.25;
 
 pub fn phase_stats(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64, peak_g: Option<f64>) -> PhaseStats {
     let n = trace.time_s.len() - 1;
@@ -70,6 +84,25 @@ pub fn phase_stats(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64, pe
         (!working.is_empty()).then(|| working.iter().sum::<f64>() / working.len() as f64 / peak * 100.0)
     });
 
+    // Off the brake: the first point after the braking started where it's below 5%.
+    let brake_release = brake_idx.and_then(|start| (start..=b).find(|&j| trace.brake[j] < 5.0));
+
+    // Grip and path radius around the slowest point, averaged over ~±5 m to calm the noise.
+    let (apex_lat_g, apex_radius_m) = if has_g {
+        let k = ((5.0 / ds).round() as usize).max(1);
+        let window = min_idx.saturating_sub(k).max(a)..=(min_idx + k).min(b);
+        let count = window.clone().count() as f64;
+        let lat_g = window.clone().map(|j| (trace.lat_g[j] as f64).abs()).sum::<f64>() / count;
+        let speed_ms = window.map(|j| trace.speed_kph[j] as f64 / 3.6).sum::<f64>() / count;
+        if lat_g >= MIN_APEX_LAT_G {
+            (Some(lat_g), Some(speed_ms * speed_ms / (lat_g * 9.81)))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     let abs_pct = (!trace.abs.is_empty()).then(|| {
         let braking: Vec<usize> = (a..=b).filter(|&j| trace.brake[j] >= 10.0).collect();
         if braking.is_empty() {
@@ -94,12 +127,58 @@ pub fn phase_stats(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64, pe
         exit_balance_deg: balance_over(apex, b),
         grip_pct,
         apex_gear: trace.gear[min_idx],
+        min_speed_at_m: from_apex(min_idx),
+        brake_release_m: brake_release.map(|j| -from_apex(j)),
+        apex_lat_g,
+        apex_radius_m,
     }
+}
+
+/// How far past its threshold a cause has to be before it's named. Below 1.0 on purpose: the
+/// apex speed is already known to be down, so the likeliest cause is worth naming even when
+/// it's only most of the way to a clear-cut difference.
+const MIN_CAUSE_SCORE: f64 = 0.6;
+
+/// Why a lap's minimum speed through a corner was lower than the baseline's, as (why, what to
+/// do) in words: whichever is furthest past its threshold among braking too early, coming off
+/// the brake early and coasting in, a tighter line, not using the grip, apexing early or late,
+/// and understeer. `None` when nothing comes close.
+pub fn slow_apex_cause(sel: &PhaseStats, base: &PhaseStats) -> Option<(&'static str, &'static str)> {
+    let mut causes: Vec<(f64, &'static str, &'static str)> = Vec::new();
+
+    if let (Some(s), Some(b)) = (sel.brake_point_m, base.brake_point_m) {
+        // Metres before the apex: larger is earlier.
+        causes.push(((s - b) / 6.0, "you're braking early and scrubbing off too much speed before the apex", "Brake later and roll more speed in."));
+    }
+    if let (Some(s), Some(b)) = (sel.brake_release_m, base.brake_release_m) {
+        causes.push(((s - b) / 8.0, "you're off the brakes early and coasting to the apex", "Trail the brake in further so the car turns and carries its speed."));
+    }
+    if let (Some(sg), Some(bg), Some(sr), Some(br)) = (sel.apex_lat_g, base.apex_lat_g, sel.apex_radius_m, base.apex_radius_m) {
+        if sg >= bg - 0.08 {
+            // Same grip on a smaller circle: the line, not the commitment.
+            causes.push(((1.0 - sr / br) / 0.08, "your line's too tight there, so the apex speed drops", "Use more of the track on the way in for a wider, faster arc."));
+        } else {
+            causes.push(((bg - sg) / 0.1, "you're not using all the grip mid-corner", "The car's got more, trust it and carry more speed in."));
+        }
+    }
+    let apex_shift = sel.min_speed_at_m - base.min_speed_at_m;
+    causes.push((-apex_shift / 10.0, "you're apexing early, then having to wait for the exit", "Turn in a touch later."));
+    causes.push((apex_shift / 10.0, "you're apexing late, with the car slowest too deep in the corner", "Turn in a touch earlier and get it rotated sooner."));
+    if let (Some(s), Some(b)) = (sel.entry_balance_deg, base.entry_balance_deg) {
+        let threshold = (0.25 * b.abs()).max(3.0);
+        causes.push(((s - b) / threshold, "understeer's scrubbing the speed off", "Trail the brake to keep the nose loaded, and use less lock."));
+    }
+
+    causes
+        .into_iter()
+        .filter(|c| c.0 >= MIN_CAUSE_SCORE)
+        .max_by(|x, y| x.0.total_cmp(&y.0))
+        .map(|(_, why, what)| (why, what))
 }
 
 /// A "typical lap" through the corner: the median of each measurement over `laps`. Optional
 /// measurements are only kept when at least half the laps have them (e.g. most laps braked).
-fn median_stats(laps: &[PhaseStats]) -> PhaseStats {
+pub fn median_stats(laps: &[PhaseStats]) -> PhaseStats {
     let med = |f: fn(&PhaseStats) -> f64| median(&mut laps.iter().map(f).collect::<Vec<_>>()).unwrap_or(0.0);
     let med_opt = |f: fn(&PhaseStats) -> Option<f64>| {
         let mut values: Vec<f64> = laps.iter().filter_map(f).collect();
@@ -120,6 +199,10 @@ fn median_stats(laps: &[PhaseStats]) -> PhaseStats {
         exit_balance_deg: med_opt(|s| s.exit_balance_deg),
         grip_pct: med_opt(|s| s.grip_pct),
         apex_gear: mode(laps.iter().map(|s| s.apex_gear)),
+        min_speed_at_m: med(|s| s.min_speed_at_m),
+        brake_release_m: med_opt(|s| s.brake_release_m),
+        apex_lat_g: med_opt(|s| s.apex_lat_g),
+        apex_radius_m: med_opt(|s| s.apex_radius_m),
     }
 }
 
@@ -394,7 +477,11 @@ fn phase_notes(sel: &PhaseStats, base: &PhaseStats, vs: &str) -> (PhaseNotes, Ph
     if min_diff >= 2.0 {
         entry.went_well.push(format!("Carried {min_diff:.0} kph more minimum speed ({:.0} vs {:.0})", sel.min_speed_kph, base.min_speed_kph));
     } else if min_diff <= -2.0 {
-        entry.to_work_on.push(format!("Minimum speed {:.0} kph lower ({:.0} vs {:.0})", -min_diff, sel.min_speed_kph, base.min_speed_kph));
+        let mut note = format!("Minimum speed {:.0} kph lower ({:.0} vs {:.0})", -min_diff, sel.min_speed_kph, base.min_speed_kph);
+        if let Some((why, what)) = slow_apex_cause(sel, base) {
+            note += &format!(": {why}. {what}");
+        }
+        entry.to_work_on.push(note);
     }
 
     if let (Some(s), Some(b)) = (sel.abs_pct, base.abs_pct) {
@@ -497,5 +584,43 @@ mod tests {
             assert!(crate::coach::prompt::corner_prompt(&vs_field).contains(&format!("Turn {}", vs_field.turn)));
         }
         assert!(corner_report(&traces, &turns, length_m, peak_g, turns.len(), a, None).is_none());
+    }
+
+    fn apex(brake_point_m: f64, brake_release_m: f64, lat_g: f64, radius_m: f64, min_speed_at_m: f64, entry_balance_deg: f64) -> PhaseStats {
+        PhaseStats {
+            entry_time_s: 3.0,
+            exit_time_s: 3.0,
+            entry_speed_kph: 200.0,
+            brake_point_m: Some(brake_point_m),
+            min_speed_kph: 100.0,
+            throttle_on_m: Some(0.0),
+            full_throttle_m: Some(40.0),
+            exit_speed_kph: 160.0,
+            coast_m: 0.0,
+            abs_pct: Some(0.0),
+            entry_balance_deg: Some(entry_balance_deg),
+            exit_balance_deg: Some(0.0),
+            grip_pct: None,
+            apex_gear: 3,
+            min_speed_at_m,
+            brake_release_m: Some(brake_release_m),
+            apex_lat_g: Some(lat_g),
+            apex_radius_m: Some(radius_m),
+        }
+    }
+
+    #[test]
+    fn slow_apex_names_the_cause() {
+        let best = apex(80.0, 10.0, 1.5, 60.0, 0.0, 2.0);
+        let why = |s: &PhaseStats| slow_apex_cause(s, &best).map(|(why, _)| why).unwrap_or("none");
+        assert!(why(&apex(95.0, 10.0, 1.5, 60.0, 0.0, 2.0)).contains("braking early"));
+        assert!(why(&apex(80.0, 25.0, 1.5, 60.0, 0.0, 2.0)).contains("off the brakes early"));
+        assert!(why(&apex(80.0, 10.0, 1.5, 50.0, 0.0, 2.0)).contains("line's too tight"));
+        assert!(why(&apex(80.0, 10.0, 1.2, 60.0, 0.0, 2.0)).contains("not using all the grip"));
+        assert!(why(&apex(80.0, 10.0, 1.5, 60.0, -15.0, 2.0)).contains("apexing early"));
+        assert!(why(&apex(80.0, 10.0, 1.5, 60.0, 15.0, 2.0)).contains("apexing late"));
+        assert!(why(&apex(80.0, 10.0, 1.5, 60.0, 0.0, 8.0)).contains("understeer"));
+        // The same pass as the best one: nothing to blame.
+        assert_eq!(why(&best), "none");
     }
 }
