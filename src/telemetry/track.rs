@@ -9,13 +9,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::trace::{detect_turns, RunData, TrackInfo, Turn};
+use crate::telemetry::trace::{detect_turns, TrackInfo, Turn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackMap {
     pub track_name: String,
-    pub display_name: String,
-    pub config_name: String,
     pub length_m: f64,
     /// "gps" or "heading".
     pub source: String,
@@ -26,18 +24,23 @@ pub struct TrackMap {
     pub points: Vec<[f32; 2]>,
 }
 
-fn track_path(track_name: &str) -> Option<PathBuf> {
-    let slug: String = track_name
-        .trim()
+/// Lower-case alphanumeric-and-dash form of a track name, used for file names. Empty when
+/// the name has nothing usable.
+pub fn slug(name: &str) -> String {
+    let slug: String = name
         .to_ascii_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let slug = slug.trim_matches('-').to_string();
+    slug.trim_matches('-').to_string()
+}
+
+fn track_path(track_name: &str) -> Option<PathBuf> {
+    let slug = slug(track_name);
     (!slug.is_empty()).then(|| PathBuf::from("data").join("tracks").join(format!("{slug}.json")))
 }
 
-pub fn load_saved(track_name: &str) -> Option<TrackMap> {
+fn load_saved(track_name: &str) -> Option<TrackMap> {
     let path = track_path(track_name)?;
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
@@ -66,21 +69,28 @@ pub fn update_turns(map: &mut TrackMap, turns: Vec<Turn>) {
     }
 }
 
-/// Fill in sector boundaries from a saved map when the source (live telemetry) lacks them.
-pub fn with_saved_sectors(mut track: TrackInfo) -> TrackInfo {
+/// Loads the track's saved map (once) and fills in sector boundaries from it when the
+/// source (live telemetry) lacks them. Hand the map to `resolve` so the file isn't read twice.
+pub fn with_saved(mut track: TrackInfo) -> (TrackInfo, Option<TrackMap>) {
+    let saved = load_saved(&track.track_name);
     if track.sector_pcts.len() < 2 {
-        if let Some(saved) = load_saved(&track.track_name) {
-            track.sector_pcts = saved.sector_pcts;
+        if let Some(saved) = &saved {
+            track.sector_pcts = saved.sector_pcts.clone();
         }
     }
-    track
+    (track, saved)
 }
 
-/// The map to show for a run: the saved one, upgraded or created from this run as needed.
-pub fn resolve(track: &TrackInfo, run: &RunData) -> Option<TrackMap> {
-    let saved = load_saved(&track.track_name);
-    let Some(points) = run.map_points.clone() else { return saved };
-    let source = if run.map_from_gps { "gps" } else { "heading" };
+/// The map to show for a run: the saved one (from `with_saved`), upgraded or created from
+/// this run's outline as needed.
+pub fn resolve(
+    track: &TrackInfo,
+    saved: Option<TrackMap>,
+    map_points: Option<Vec<[f32; 2]>>,
+    map_from_gps: bool,
+) -> Option<TrackMap> {
+    let Some(points) = map_points else { return saved };
+    let source = if map_from_gps { "gps" } else { "heading" };
 
     match saved {
         Some(mut saved) => {
@@ -107,8 +117,6 @@ pub fn resolve(track: &TrackInfo, run: &RunData) -> Option<TrackMap> {
             };
             let map = TrackMap {
                 track_name: track.track_name.clone(),
-                display_name: track.display_name.clone(),
-                config_name: track.config_name.clone(),
                 length_m,
                 source: source.to_string(),
                 sector_pcts: track.sector_pcts.clone(),

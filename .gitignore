@@ -27,3 +27,6 @@ desktop.ini
 # Env files, just in case
 .env
 .env.*
+
+# Kokoro TTS model files (downloaded by scripts/setup-voice.*)
+/data/voice/

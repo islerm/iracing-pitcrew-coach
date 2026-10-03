@@ -6,26 +6,19 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::trace::{build_run, Frame, TrackInfo};
-use crate::types::LapMetrics;
-
-/// Everything recorded during a live session, ready for `trace::build_run`.
-pub struct LiveCapture {
-    pub track: TrackInfo,
-    pub frames: Vec<Frame>,
-}
+use crate::telemetry::trace::{lap_metrics, Capture, Frame, LapMetrics, TrackInfo};
 
 /// Collects frames and publishes finished laps to `sink` while a recording is running.
 /// Fed by the real iRacing connection or by an .ibt replay.
 struct Recorder {
     track: TrackInfo,
     frames: Vec<Frame>,
-    sink: Option<Arc<Mutex<Vec<LapMetrics>>>>,
+    sink: Arc<Mutex<Vec<LapMetrics>>>,
     republish_at: Option<f64>,
 }
 
 impl Recorder {
-    fn new(track: TrackInfo, sink: Option<Arc<Mutex<Vec<LapMetrics>>>>) -> Self {
+    fn new(track: TrackInfo, sink: Arc<Mutex<Vec<LapMetrics>>>) -> Self {
         Self { track, frames: Vec::new(), sink, republish_at: None }
     }
 
@@ -52,31 +45,25 @@ impl Recorder {
             self.republish_at = None;
         }
         if crossed_line || republish {
-            if let Some(sink) = &self.sink {
-                let laps = build_run(&self.frames, &self.track).laps;
-                if let Ok(mut sink) = sink.lock() {
-                    *sink = laps;
-                }
+            let laps = lap_metrics(&self.frames, &self.track);
+            if let Ok(mut sink) = self.sink.lock() {
+                *sink = laps;
             }
         }
     }
 
-    fn finish(self) -> LiveCapture {
-        LiveCapture { track: self.track, frames: self.frames }
+    fn finish(self) -> Capture {
+        Capture { track: self.track, frames: self.frames }
     }
 }
 
-fn stopped(stop_signal: &Option<Arc<AtomicBool>>) -> bool {
-    stop_signal.as_ref().map(|flag| flag.load(Ordering::Relaxed)).unwrap_or(false)
-}
-
+/// Records until `stop_signal` is set. Finished laps are also published to `live_sink`
+/// so callers can show lap times while the recording is still running.
 #[cfg(windows)]
-fn capture_live_telemetry(
-    duration: Option<Duration>,
-    stop_signal: Option<Arc<AtomicBool>>,
-    live_sink: Option<Arc<Mutex<Vec<LapMetrics>>>>,
-    verbose: bool,
-) -> Result<LiveCapture> {
+pub fn run_live_telemetry_until_stopped(
+    stop_signal: Arc<AtomicBool>,
+    live_sink: Arc<Mutex<Vec<LapMetrics>>>,
+) -> Result<Capture> {
     use iracing::telemetry::{Connection, Sample, Value};
 
     let mut conn = Connection::new().map_err(|e| anyhow::anyhow!("Unable to open telemetry. Is iRacing running? {e}"))?;
@@ -91,7 +78,7 @@ fn capture_live_telemetry(
                 .find(|driver| driver.index == session.drivers.car_index)
                 .map(|driver| driver.car_screen_name.clone())
                 .unwrap_or_default();
-            crate::track::with_saved_sectors(TrackInfo {
+            crate::telemetry::track::with_saved(TrackInfo {
                 track_name: session.weekend.track_name.clone(),
                 display_name: session.weekend.track_display_name.clone(),
                 config_name: session.weekend.track_config_name.clone(),
@@ -108,13 +95,14 @@ fn capture_live_telemetry(
                 shift_rpm: Some(session.drivers.shift_light_shift_rpm as f64).filter(|v| *v > 0.0),
                 redline_rpm: Some(session.drivers.red_line_rpm as f64).filter(|v| *v > 0.0),
                 // The rest of the weather comes from the telemetry channels on every sample.
-                weather: crate::weather::WeatherSnapshot {
+                weather: crate::telemetry::weather::WeatherSnapshot {
                     weather_type: session.weekend.track_weather.clone(),
                     skies: session.weekend.track_skies.clone(),
-                    wind_ms: crate::weather::wind_ms(&session.weekend.track_wind_speed),
+                    wind_ms: crate::telemetry::weather::wind_ms(&session.weekend.track_wind_speed),
                     ..Default::default()
                 },
             })
+            .0
         }
         Err(err) => {
             eprintln!("Could not read iRacing session info ({err}); recording without track details.");
@@ -123,7 +111,6 @@ fn capture_live_telemetry(
     };
 
     let blocking = conn.blocking().map_err(|e| anyhow::anyhow!("Could not create telemetry handle: {e}"))?;
-    let end = duration.map(|d| Instant::now() + d);
     let mut recorder = Recorder::new(track, live_sink);
 
     fn num(sample: &Sample, name: &'static str) -> Option<f64> {
@@ -137,103 +124,27 @@ fn capture_live_telemetry(
         }
     }
 
-    while end.map(|deadline| Instant::now() < deadline).unwrap_or(true) {
-        if stopped(&stop_signal) {
-            break;
-        }
-
-        let telem = match blocking.sample(Duration::from_millis(500)) {
-            Ok(sample) => sample,
-            Err(err) => {
-                if verbose {
-                    println!("Telemetry error: {err:?}");
-                }
-                continue;
-            }
-        };
-
-        let nan = |v: Option<f64>| v.unwrap_or(f64::NAN);
-        let temps: Vec<f32> = ["LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL"]
-            .iter()
-            .filter_map(|name| num(&telem, name))
-            .map(|t| t as f32)
-            .filter(|t| t.is_finite() && *t > 0.0)
-            .collect();
-
-        let frame = Frame {
-            time: nan(num(&telem, "SessionTime")),
-            lap: num(&telem, "Lap").unwrap_or(0.0) as i32,
-            pct: nan(num(&telem, "LapDistPct")),
-            speed_ms: nan(num(&telem, "Speed")) as f32,
-            throttle: nan(num(&telem, "Throttle")) as f32,
-            brake: nan(num(&telem, "Brake")) as f32,
-            gear: num(&telem, "Gear").unwrap_or(0.0) as i32,
-            steer_rad: nan(num(&telem, "SteeringWheelAngle")) as f32,
-            yaw: nan(num(&telem, "YawNorth").or_else(|| num(&telem, "Yaw"))) as f32,
-            lat: f64::NAN,
-            lon: f64::NAN,
-            on_pit_road: num(&telem, "OnPitRoad").unwrap_or(0.0) != 0.0,
-            last_lap_time: nan(num(&telem, "LapLastLapTime")) as f32,
-            tyre_avg: if temps.is_empty() { f32::NAN } else { temps.iter().sum::<f32>() / temps.len() as f32 },
-            tyre_min: temps.iter().copied().fold(f32::NAN, f32::min),
-            tyre_max: temps.iter().copied().fold(f32::NAN, f32::max),
-            lat_accel: nan(num(&telem, "LatAccel")) as f32,
-            long_accel: nan(num(&telem, "LongAccel")) as f32,
-            yaw_rate: nan(num(&telem, "YawRate")) as f32,
-            abs_active: nan(num(&telem, "BrakeABSactive")) as f32,
-            track_surface: num(&telem, "PlayerTrackSurface").map(|v| v as i8),
-            incidents: nan(num(&telem, "PlayerCarMyIncidentCount")) as f32,
-            rpm: nan(num(&telem, "RPM")) as f32,
-            alt: nan(num(&telem, "Alt")) as f32,
-            weather: crate::weather::WeatherSample::from_channels(|i| num(&telem, crate::weather::CHANNELS[i])),
-        };
-
-        if verbose {
-            println!(
-                "Lap {:>3} {:>5.1}% {:>6.1} kph gear {}",
-                frame.lap,
-                frame.pct * 100.0,
-                frame.speed_ms * 3.6,
-                frame.gear
-            );
-        }
+    let channels: Vec<&'static str> = crate::telemetry::trace::channel_names().collect();
+    while !stop_signal.load(Ordering::Relaxed) {
+        // Timeouts while iRacing is paused or loading are expected: just poll again.
+        let Ok(telem) = blocking.sample(Duration::from_millis(500)) else { continue };
 
         // Not in the car on track (garage, spectating, replay): nothing useful to record.
-        if num(&telem, "IsOnTrack").map(|v| v == 0.0).unwrap_or(false) {
+        if num(&telem, "IsOnTrack") == Some(0.0) {
             continue;
         }
+        let frame = Frame::from_channels(|i| num(&telem, channels[i]));
         recorder.push(frame);
     }
 
     Ok(recorder.finish())
 }
 
-#[cfg(windows)]
-pub fn run_live_telemetry(duration_seconds: u64) -> Result<Vec<LapMetrics>> {
-    let capture = capture_live_telemetry(Some(Duration::from_secs(duration_seconds)), None, None, true)?;
-    Ok(build_run(&capture.frames, &capture.track).laps)
-}
-
-/// Records until `stop_signal` is set. Finished laps are also published to `live_sink`
-/// so callers can show lap times while the recording is still running.
-#[cfg(windows)]
-pub fn run_live_telemetry_until_stopped(
-    stop_signal: Arc<AtomicBool>,
-    live_sink: Arc<Mutex<Vec<LapMetrics>>>,
-) -> Result<LiveCapture> {
-    capture_live_telemetry(None, Some(stop_signal), Some(live_sink), false)
-}
-
-#[cfg(not(windows))]
-pub fn run_live_telemetry(_duration_seconds: u64) -> Result<Vec<LapMetrics>> {
-    anyhow::bail!("Live telemetry requires a Windows host with iRacing running. Use --replay <file.ibt> to simulate it.")
-}
-
 #[cfg(not(windows))]
 pub fn run_live_telemetry_until_stopped(
     _stop_signal: Arc<AtomicBool>,
     _live_sink: Arc<Mutex<Vec<LapMetrics>>>,
-) -> Result<LiveCapture> {
+) -> Result<Capture> {
     anyhow::bail!("Live telemetry requires a Windows host with iRacing running. Start the UI with --replay <file.ibt> to simulate it.")
 }
 
@@ -245,17 +156,16 @@ pub fn replay_until_stopped(
     speed: f64,
     stop_signal: Arc<AtomicBool>,
     live_sink: Arc<Mutex<Vec<LapMetrics>>>,
-) -> Result<LiveCapture> {
-    let data = crate::ibt::read_ibt(path)?;
-    let track = crate::track::with_saved_sectors(data.track);
-    let mut recorder = Recorder::new(track, Some(live_sink));
-    let stop = Some(stop_signal);
+) -> Result<Capture> {
+    let data = crate::telemetry::ibt::read_ibt(path)?;
+    let track = crate::telemetry::track::with_saved(data.track).0;
+    let mut recorder = Recorder::new(track, live_sink);
     let speed = if speed > 0.0 { speed } else { 1.0 };
 
     let started = Instant::now();
     let first_time = data.frames.iter().map(|f| f.time).find(|t| t.is_finite()).unwrap_or(0.0);
     for frame in data.frames {
-        if stopped(&stop) {
+        if stop_signal.load(Ordering::Relaxed) {
             break;
         }
         if frame.time.is_finite() {
@@ -274,6 +184,7 @@ pub fn replay_until_stopped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::trace::build_run;
 
     #[test]
     fn replay_feeds_the_live_pipeline() {

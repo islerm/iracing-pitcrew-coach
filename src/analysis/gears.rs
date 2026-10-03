@@ -3,7 +3,8 @@
 
 use serde::Serialize;
 
-use crate::trace::LapTrace;
+use crate::stats::{median, percentile};
+use crate::telemetry::trace::LapTrace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +27,6 @@ pub struct Upshift {
     pub pct: f64,
     /// Highest RPM in the few metres before the change.
     pub rpm: f64,
-    pub speed_kph: f64,
     pub verdict: Verdict,
 }
 
@@ -65,12 +65,6 @@ pub struct ShiftReport {
     pub notes: Vec<String>,
 }
 
-fn median(values: &mut [f64]) -> f64 {
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let m = values.len() / 2;
-    if values.len() % 2 == 0 { (values[m - 1] + values[m]) / 2.0 } else { values[m] }
-}
-
 /// Upshifts found in one lap's trace (before judging).
 fn find_upshifts(trace: &LapTrace) -> Vec<(Upshift, bool)> {
     if trace.rpm.is_empty() {
@@ -91,7 +85,6 @@ fn find_upshifts(trace: &LapTrace) -> Vec<(Upshift, bool)> {
                 to: trace.gear[j],
                 pct: j as f64 / n as f64,
                 rpm,
-                speed_kph: trace.speed_kph[j - 1] as f64,
                 verdict: Verdict::Unknown,
             };
             (shift, full)
@@ -99,8 +92,8 @@ fn find_upshifts(trace: &LapTrace) -> Vec<(Upshift, bool)> {
         .collect()
 }
 
-pub fn shift_report(traces: &[LapTrace], shift_rpm: Option<f64>, redline_rpm: Option<f64>, length_m: f64) -> ShiftReport {
-    let mut found: Vec<(Upshift, bool)> = traces.iter().flat_map(find_upshifts).collect();
+pub fn shift_report(traces: &[&LapTrace], shift_rpm: Option<f64>, redline_rpm: Option<f64>, length_m: f64) -> ShiftReport {
+    let mut found: Vec<(Upshift, bool)> = traces.iter().copied().flat_map(find_upshifts).collect();
 
     // Judge against the shift light. Without one, fall back to the highest revs you reach at
     // full throttle (98th percentile): not an optimum, but it shows which changes come early.
@@ -109,9 +102,8 @@ pub fn shift_report(traces: &[LapTrace], shift_rpm: Option<f64>, redline_rpm: Op
         None => {
             let mut peaks: Vec<f64> = found.iter().filter(|(_, full)| *full).map(|(s, _)| s.rpm).collect();
             if peaks.len() >= 3 {
-                peaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let p98 = peaks[((peaks.len() - 1) as f64 * 0.98).round() as usize];
-                (Some(p98), Some("your highest shift RPM (the car's shift light isn't in this file)".to_string()))
+                let p98 = percentile(&mut peaks, 0.98);
+                (p98, Some("your highest shift RPM (the car's shift light isn't in this file)".to_string()))
             } else {
                 (None, None)
             }
@@ -150,7 +142,7 @@ pub fn shift_report(traces: &[LapTrace], shift_rpm: Option<f64>, redline_rpm: Op
                 count: judged.len(),
                 min_rpm: rpms.iter().copied().fold(f64::INFINITY, f64::min),
                 max_rpm: rpms.iter().copied().fold(0.0, f64::max),
-                median_rpm: median(&mut rpms),
+                median_rpm: median(&mut rpms).unwrap_or_default(),
                 early: judged.iter().filter(|s| s.verdict == Verdict::Early).count(),
                 late: judged.iter().filter(|s| s.verdict == Verdict::Late).count(),
             })
@@ -191,7 +183,7 @@ pub fn shift_report(traces: &[LapTrace], shift_rpm: Option<f64>, redline_rpm: Op
     }
     let mut limiter_m: Vec<f64> = limiter.iter().map(|l| l.metres).collect();
     if !limiter_m.is_empty() {
-        let m = median(&mut limiter_m);
+        let m = median(&mut limiter_m).unwrap_or_default();
         if m >= 20.0 {
             notes.push(format!("You're on the rev limiter for about {m:.0} m a lap. That's time the engine isn't accelerating the car: change up before it cuts in."));
         }
@@ -213,24 +205,25 @@ pub fn shift_report(traces: &[LapTrace], shift_rpm: Option<f64>, redline_rpm: Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::build_run;
+    use crate::telemetry::trace::build_run;
     use std::path::Path;
 
     #[test]
     fn shifts_on_fixture() {
-        let data = crate::ibt::read_ibt(Path::new("tests/fixtures/roadatlanta-full.ibt")).expect("read fixture");
+        let data = crate::telemetry::ibt::read_ibt(Path::new("tests/fixtures/roadatlanta-full.ibt")).expect("read fixture");
         let run = build_run(&data.frames, &data.track);
         assert!(run.traces.iter().all(|t| t.rpm.len() == t.time_s.len()), "fixture has RPM");
 
         // No shift light in the fixture: the reference falls back to your own highest shifts.
-        let report = shift_report(&run.traces, None, None, data.track.length_m);
+        let traces: Vec<&LapTrace> = run.traces.iter().collect();
+        let report = shift_report(&traces, None, None, data.track.length_m);
         assert!(report.upshifts.len() >= 4 * run.traces.len(), "{} upshifts", report.upshifts.len());
         assert!(report.upshifts.iter().all(|s| s.to == s.from + 1 && s.rpm > 3000.0 && s.rpm < 12000.0));
         assert!(report.reference_rpm.is_some());
         assert!(!report.pairs.is_empty());
 
         // With a known shift light, everything is judged against it.
-        let high = shift_report(&run.traces, Some(20000.0), Some(21000.0), data.track.length_m);
+        let high = shift_report(&traces, Some(20000.0), Some(21000.0), data.track.length_m);
         assert!(high.upshifts.iter().all(|s| matches!(s.verdict, Verdict::Early | Verdict::PartThrottle)));
         assert!(high.notes.iter().any(|n| n.contains("early")));
         assert!(high.limiter.iter().all(|l| l.metres == 0.0));

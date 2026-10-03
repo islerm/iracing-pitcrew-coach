@@ -3,8 +3,8 @@
 
 use serde::Serialize;
 
-use crate::handling::{peak_combined_g, turn_segments};
-use crate::trace::{LapTrace, Turn};
+use crate::stats::{grid_index, median};
+use crate::telemetry::trace::{turn_segments, LapTrace, Turn};
 
 /// How one lap drove the two halves of one corner.
 #[derive(Debug, Clone, Serialize)]
@@ -29,7 +29,8 @@ pub struct PhaseStats {
     /// Mean balance where the car is most loaded laterally (+ understeer, − oversteer).
     pub entry_balance_deg: Option<f64>,
     pub exit_balance_deg: Option<f64>,
-    /// Mean combined g while braking or cornering, as % of the session peak.
+    /// Mean combined g while braking or cornering, as % of the session peak. Feeds the notes; not shipped to the UI.
+    #[serde(skip)]
     pub grip_pct: Option<f64>,
     /// Gear at the slowest point.
     pub apex_gear: i8,
@@ -37,7 +38,7 @@ pub struct PhaseStats {
 
 pub fn phase_stats(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64, peak_g: Option<f64>) -> PhaseStats {
     let n = trace.time_s.len() - 1;
-    let idx = |pct: f64| ((pct * n as f64).round() as usize).min(n);
+    let idx = |pct: f64| grid_index(pct, n);
     let (a, apex, b) = (idx(segment.0), idx(segment.1), idx(segment.2));
     let ds = length_m / n as f64;
     let from_apex = |j: usize| (j as f64 - apex as f64) * ds;
@@ -96,22 +97,13 @@ pub fn phase_stats(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64, pe
     }
 }
 
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let m = values.len() / 2;
-    Some(if values.len() % 2 == 0 { (values[m - 1] + values[m]) / 2.0 } else { values[m] })
-}
-
 /// A "typical lap" through the corner: the median of each measurement over `laps`. Optional
 /// measurements are only kept when at least half the laps have them (e.g. most laps braked).
 fn median_stats(laps: &[PhaseStats]) -> PhaseStats {
-    let med = |f: fn(&PhaseStats) -> f64| median(laps.iter().map(f).collect()).unwrap_or(0.0);
+    let med = |f: fn(&PhaseStats) -> f64| median(&mut laps.iter().map(f).collect::<Vec<_>>()).unwrap_or(0.0);
     let med_opt = |f: fn(&PhaseStats) -> Option<f64>| {
-        let values: Vec<f64> = laps.iter().filter_map(f).collect();
-        (values.len() * 2 >= laps.len()).then(|| median(values)).flatten()
+        let mut values: Vec<f64> = laps.iter().filter_map(f).collect();
+        (values.len() * 2 >= laps.len()).then(|| median(&mut values)).flatten()
     };
     PhaseStats {
         entry_time_s: med(|s| s.entry_time_s),
@@ -159,8 +151,6 @@ pub struct Terrain {
     /// How far the apex sits above (+, a crest) or below (−, a compression) the road 40 m
     /// either side of it.
     pub apex_crest_m: f64,
-    /// Height change from the segment start to its end.
-    pub change_m: f64,
 }
 
 pub fn terrain(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64) -> Option<Terrain> {
@@ -169,7 +159,7 @@ pub fn terrain(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64) -> Opt
         return None;
     }
     let n = alt.len() - 1;
-    let idx = |pct: f64| ((pct * n as f64).round() as usize).min(n);
+    let idx = |pct: f64| grid_index(pct, n);
     let (a, apex, b) = (idx(segment.0), idx(segment.1), idx(segment.2));
     let ds = length_m / n as f64;
     let steps = |m: f64| (m / ds).round().max(1.0) as usize;
@@ -179,7 +169,6 @@ pub fn terrain(trace: &LapTrace, segment: (f64, f64, f64), length_m: f64) -> Opt
         entry_grade_pct: grade(apex.saturating_sub(steps(150.0)).max(a), apex),
         exit_grade_pct: grade(apex, (apex + steps(150.0)).min(b)),
         apex_crest_m: alt[apex] as f64 - (alt[apex.saturating_sub(k)] as f64 + alt[(apex + k).min(n)] as f64) / 2.0,
-        change_m: (alt[b] - alt[a]) as f64,
     })
 }
 
@@ -254,11 +243,18 @@ fn rank(lap: i32, laps: &[(i32, f64)]) -> Option<PhaseRank> {
 
 /// Compares `lap` through turn `turn_index` against `ref_lap`, or against the median of the
 /// other laps in `traces` when `ref_lap` is `None`. `traces` should hold only the laps the
-/// driver counts; the rankings are over those.
-pub fn corner_report(traces: &[LapTrace], turns: &[Turn], length_m: f64, turn_index: usize, lap: i32, ref_lap: Option<i32>) -> Option<CornerReport> {
+/// driver counts; the rankings are over those. `peak_g` is the session's grip-use reference.
+pub fn corner_report(
+    traces: &[&LapTrace],
+    turns: &[Turn],
+    length_m: f64,
+    peak_g: Option<f64>,
+    turn_index: usize,
+    lap: i32,
+    ref_lap: Option<i32>,
+) -> Option<CornerReport> {
     let turn = turns.get(turn_index)?;
     let segment = turn_segments(turns)[turn_index];
-    let peak_g = peak_combined_g(traces);
     let stats: Vec<(i32, PhaseStats)> = traces.iter().map(|t| (t.lap_number, phase_stats(t, segment, length_m, peak_g))).collect();
     let find = |n: i32| stats.iter().find(|(l, _)| *l == n).map(|(_, s)| s.clone());
 
@@ -466,82 +462,25 @@ fn phase_notes(sel: &PhaseStats, base: &PhaseStats, vs: &str) -> (PhaseNotes, Ph
     (entry, exit)
 }
 
-/// Prompt for the coach model: the findings first (small local models follow those far better
-/// than raw numbers), then the measurements, with which direction is better spelled out.
-pub fn build_corner_prompt(report: &CornerReport) -> String {
-    let (s, b) = (&report.sel, &report.base);
-    let vs = &report.baseline_label;
-    let opt = |v: Option<f64>, unit: &str| v.map(|v| format!("{v:.0}{unit}")).unwrap_or_else(|| "n/a".to_string());
-    let row = |name: &str, sv: String, bv: String, hint: &str| format!("- {name}: {sv} on lap {} vs {bv} on {vs}{hint}", report.lap);
-    let mut lines = vec![
-        row("Entry time (turn-in zone to apex)", format!("{:.3}s", s.entry_time_s), format!("{:.3}s", b.entry_time_s), " (lower is better)"),
-        row("Exit time (apex to the next straight)", format!("{:.3}s", s.exit_time_s), format!("{:.3}s", b.exit_time_s), " (lower is better)"),
-        row("Speed when braking starts", format!("{:.0} kph", s.entry_speed_kph), format!("{:.0} kph", b.entry_speed_kph), ""),
-        row("Brake point, metres before the apex", opt(s.brake_point_m, " m"), opt(b.brake_point_m, " m"), " (smaller = later braking)"),
-        row("Minimum speed", format!("{:.0} kph", s.min_speed_kph), format!("{:.0} kph", b.min_speed_kph), " (higher is better)"),
-        row("Throttle pickup, metres after the apex", opt(s.throttle_on_m, " m"), opt(b.throttle_on_m, " m"), " (smaller = earlier, better)"),
-        row("Full throttle, metres after the apex", opt(s.full_throttle_m, " m"), opt(b.full_throttle_m, " m"), " (smaller = earlier, better)"),
-        row("Exit speed", format!("{:.0} kph", s.exit_speed_kph), format!("{:.0} kph", b.exit_speed_kph), " (higher is better)"),
-        row("Coasting, no pedals", format!("{:.0} m", s.coast_m), format!("{:.0} m", b.coast_m), " (less is better)"),
-        row("Gear at the slowest point", s.apex_gear.to_string(), b.apex_gear.to_string(), ""),
-    ];
-    for g in &report.gear_options {
-        lines.push(format!("- Laps taking the apex in gear {}: {} lap(s), best {:.3}s through the corner", g.gear, g.laps.len(), g.best_time_s));
-    }
-    if s.abs_pct.is_some() {
-        lines.push(row("ABS share of braking", opt(s.abs_pct, "%"), opt(b.abs_pct, "%"), " (less is better)"));
-    }
-    if s.entry_balance_deg.is_some() {
-        let hint = " (positive = understeer, negative = oversteer; closer to zero is more neutral)";
-        lines.push(row("Entry balance", opt(s.entry_balance_deg, "°"), opt(b.entry_balance_deg, "°"), hint));
-        lines.push(row("Exit balance", opt(s.exit_balance_deg, "°"), opt(b.exit_balance_deg, "°"), hint));
-    }
-    for (name, r) in [("entry", &report.entry_rank), ("exit", &report.exit_rank)] {
-        if let Some(r) = r {
-            lines.push(format!("- Lap {}'s {name} ranks {} of {} laps (quickest: lap {}).", report.lap, r.rank, r.of, r.best_lap));
-        }
-    }
-    let list = |items: &[String]| if items.is_empty() { "nothing notable".to_string() } else { items.join("; ") };
-    let terrain = if report.terrain_notes.is_empty() {
-        String::new()
-    } else {
-        format!("The track here (use this to explain why, e.g. where the car is light or loaded):\n{}\n\n", report.terrain_notes.iter().map(|n| format!("- {n}")).collect::<Vec<_>>().join("\n"))
-    };
-
-    format!(
-        "You are a race engineer coaching an iRacing driver through Turn {turn}. You are comparing lap {lap} with {vs}. \
-Use only the facts below and don't invent numbers or targets.\n\n\
-Findings:\n- Entry, went well: {ew}\n- Entry, to work on: {eb}\n- Exit, went well: {xw}\n- Exit, to work on: {xb}\n\n\
-{terrain}\
-Measurements:\n{data}\n\n\
-Reply in under 120 words as two short paragraphs starting \"Entry:\" and \"Exit:\". In each, name one thing to keep doing and one concrete change \
-for the next lap, based on the findings. Call the comparison \"{vs}\", never \"last lap\". Speak like a calm pit lane engineer, no bullet points.",
-        turn = report.turn,
-        lap = report.lap,
-        ew = list(&report.entry.went_well),
-        eb = list(&report.entry.to_work_on),
-        xw = list(&report.exit.went_well),
-        xb = list(&report.exit.to_work_on),
-        data = lines.join("\n"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{build_run, detect_turns};
+    use crate::telemetry::trace::{build_run, detect_turns};
     use std::path::Path;
 
     #[test]
     fn corner_report_on_fixture() {
-        let data = crate::ibt::read_ibt(Path::new("tests/fixtures/roadatlanta-full.ibt")).expect("read fixture");
+        let data = crate::telemetry::ibt::read_ibt(Path::new("tests/fixtures/roadatlanta-full.ibt")).expect("read fixture");
         let run = build_run(&data.frames, &data.track);
         assert!(run.traces.len() >= 2, "fixture needs two traced laps");
         let turns = detect_turns(run.map_points.as_ref().unwrap(), data.track.length_m);
         let (a, b) = (run.traces[0].lap_number, run.traces[1].lap_number);
+        let traces: Vec<&LapTrace> = run.traces.iter().collect();
+        let peak_g = crate::analysis::handling::peak_combined_g(&run.traces);
+        let length_m = data.track.length_m;
 
         for i in 0..turns.len() {
-            let vs_lap = corner_report(&run.traces, &turns, data.track.length_m, i, a, Some(b)).expect("report vs lap");
+            let vs_lap = corner_report(&traces, &turns, length_m, peak_g, i, a, Some(b)).expect("report vs lap");
             assert_eq!(vs_lap.ref_lap, Some(b));
             let s = &vs_lap.sel;
             assert!(s.entry_time_s > 0.0 && s.exit_time_s > 0.0, "turn {} times {s:?}", vs_lap.turn);
@@ -550,13 +489,13 @@ mod tests {
             assert!(!(vs_lap.entry.went_well.is_empty() && vs_lap.entry.to_work_on.is_empty()));
             assert!(!(vs_lap.exit.went_well.is_empty() && vs_lap.exit.to_work_on.is_empty()));
 
-            let vs_field = corner_report(&run.traces, &turns, data.track.length_m, i, a, None).expect("report vs field");
+            let vs_field = corner_report(&traces, &turns, length_m, peak_g, i, a, None).expect("report vs field");
             assert_eq!(vs_field.ref_lap, None);
             assert_eq!(vs_field.field_size, run.traces.len() - 1);
             let r = vs_field.entry_rank.as_ref().expect("rank");
             assert!(r.rank >= 1 && r.rank <= r.of);
-            assert!(build_corner_prompt(&vs_field).contains(&format!("Turn {}", vs_field.turn)));
+            assert!(crate::coach::prompt::corner_prompt(&vs_field).contains(&format!("Turn {}", vs_field.turn)));
         }
-        assert!(corner_report(&run.traces, &turns, data.track.length_m, turns.len(), a, None).is_none());
+        assert!(corner_report(&traces, &turns, length_m, peak_g, turns.len(), a, None).is_none());
     }
 }

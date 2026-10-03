@@ -10,8 +10,8 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::trace::{Frame, TrackInfo};
-use crate::weather::{self, WeatherSample, WeatherSnapshot};
+use crate::telemetry::trace::{channel_names, Capture, Frame, TrackInfo};
+use crate::telemetry::weather::WeatherSnapshot;
 
 const HEADER_SIZE: usize = 112;
 const VAR_HEADER_SIZE: usize = 144;
@@ -20,11 +20,6 @@ const VAR_HEADER_SIZE: usize = 144;
 struct Var {
     ty: i32,
     offset: usize,
-}
-
-pub struct IbtData {
-    pub track: TrackInfo,
-    pub frames: Vec<Frame>,
 }
 
 fn i32_at(bytes: &[u8], offset: usize) -> i32 {
@@ -59,7 +54,7 @@ fn yaml_value<'a>(yaml: &'a str, key: &str, from: usize) -> Option<(&'a str, usi
     None
 }
 
-pub fn parse_track_info(yaml: &str) -> TrackInfo {
+fn parse_track_info(yaml: &str) -> TrackInfo {
     let get = |key: &str| yaml_value(yaml, key, 0).map(|(v, _)| v.to_string()).unwrap_or_default();
 
     let length_m = get("TrackLength")
@@ -153,7 +148,7 @@ fn open_raw(path: &Path) -> Result<RawIbt> {
     reader.seek(SeekFrom::Start(var_header_offset))?;
     reader.read_exact(&mut var_bytes)?;
     let vars = var_bytes
-        .chunks_exact(VAR_HEADER_SIZE)
+        .as_chunks::<VAR_HEADER_SIZE>().0.iter()
         .map(|chunk| {
             let name_bytes = &chunk[16..48];
             let end = name_bytes.iter().position(|b| *b == 0).unwrap_or(name_bytes.len());
@@ -172,88 +167,34 @@ fn open_raw(path: &Path) -> Result<RawIbt> {
     Ok(RawIbt { reader, header, vars, yaml, buf_len })
 }
 
-pub fn read_ibt(path: &Path) -> Result<IbtData> {
+pub fn read_ibt(path: &Path) -> Result<Capture> {
     let RawIbt { mut reader, vars, yaml, buf_len, .. } = open_raw(path)?;
     let find = |name: &str| vars.iter().find(|(n, _, _)| n == name).map(|(_, v, _)| v.clone());
     let track = parse_track_info(&yaml);
 
-    let v_time = find("SessionTime");
-    let v_lap = find("Lap");
-    let v_pct = find("LapDistPct");
-    let v_speed = find("Speed");
-    let v_throttle = find("Throttle");
-    let v_brake = find("Brake");
-    let v_gear = find("Gear");
-    let v_steer = find("SteeringWheelAngle");
-    let v_yaw = find("YawNorth").or_else(|| find("Yaw"));
-    let v_lat = find("Lat");
-    let v_lon = find("Lon");
-    let v_pit = find("OnPitRoad");
-    let v_last_lap = find("LapLastLapTime");
-    let v_lat_accel = find("LatAccel");
-    let v_long_accel = find("LongAccel");
-    let v_yaw_rate = find("YawRate");
-    let v_abs = find("BrakeABSactive");
-    let v_surface = find("PlayerTrackSurface");
-    let v_incidents = find("PlayerCarMyIncidentCount");
-    let v_rpm = find("RPM");
-    let v_alt = find("Alt");
-    let v_tyres: Vec<Option<Var>> = ["LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL"].iter().map(|n| find(n)).collect();
-    let v_weather: Vec<Option<Var>> = weather::CHANNELS.iter().map(|n| find(n)).collect();
-    if v_lap.is_none() || v_pct.is_none() || v_time.is_none() {
+    if ["Lap", "LapDistPct", "SessionTime"].iter().any(|name| find(name).is_none()) {
         bail!("{} is missing Lap/LapDistPct/SessionTime channels", path.display());
     }
+    // Where each of `channel_names()` sits in a sample, looked up once for the whole file.
+    let channels: Vec<Option<Var>> = channel_names().map(find).collect();
 
     let mut sample = vec![0u8; buf_len];
     let mut frames = Vec::new();
-    let nan = |v: Option<f64>| v.unwrap_or(f64::NAN);
     while reader.read_exact(&mut sample).is_ok() {
-        let temps: Vec<f32> = v_tyres
-            .iter()
-            .filter_map(|v| read_value(&sample, v))
-            .map(|t| t as f32)
-            .filter(|t| t.is_finite() && *t > 0.0)
-            .collect();
-        frames.push(Frame {
-            time: nan(read_value(&sample, &v_time)),
-            lap: read_value(&sample, &v_lap).unwrap_or(0.0) as i32,
-            pct: nan(read_value(&sample, &v_pct)),
-            speed_ms: nan(read_value(&sample, &v_speed)) as f32,
-            throttle: nan(read_value(&sample, &v_throttle)) as f32,
-            brake: nan(read_value(&sample, &v_brake)) as f32,
-            gear: read_value(&sample, &v_gear).unwrap_or(0.0) as i32,
-            steer_rad: nan(read_value(&sample, &v_steer)) as f32,
-            yaw: nan(read_value(&sample, &v_yaw)) as f32,
-            lat: nan(read_value(&sample, &v_lat)),
-            lon: nan(read_value(&sample, &v_lon)),
-            on_pit_road: read_value(&sample, &v_pit).unwrap_or(0.0) != 0.0,
-            last_lap_time: nan(read_value(&sample, &v_last_lap)) as f32,
-            tyre_avg: if temps.is_empty() { f32::NAN } else { temps.iter().sum::<f32>() / temps.len() as f32 },
-            tyre_min: temps.iter().copied().fold(f32::NAN, f32::min),
-            tyre_max: temps.iter().copied().fold(f32::NAN, f32::max),
-            lat_accel: nan(read_value(&sample, &v_lat_accel)) as f32,
-            long_accel: nan(read_value(&sample, &v_long_accel)) as f32,
-            yaw_rate: nan(read_value(&sample, &v_yaw_rate)) as f32,
-            abs_active: nan(read_value(&sample, &v_abs)) as f32,
-            track_surface: read_value(&sample, &v_surface).map(|v| v as i8),
-            incidents: nan(read_value(&sample, &v_incidents)) as f32,
-            rpm: nan(read_value(&sample, &v_rpm)) as f32,
-            alt: nan(read_value(&sample, &v_alt)) as f32,
-            weather: WeatherSample::from_channels(|i| read_value(&sample, &v_weather[i])),
-        });
+        frames.push(Frame::from_channels(|i| read_value(&sample, &channels[i])));
     }
 
     if frames.is_empty() {
         bail!("{} contains no telemetry samples", path.display());
     }
-    Ok(IbtData { track, frames })
+    Ok(Capture { track, frames })
 }
 
 /// Channels kept in test fixtures: what the app reads, plus a few likely to be useful soon.
 const FIXTURE_CHANNELS: &[&str] = &[
     "SessionTime", "Lap", "LapDistPct", "LapDist", "LapLastLapTime", "Speed", "RPM", "Gear",
     "Throttle", "Brake", "SteeringWheelAngle", "Yaw", "YawNorth", "Lat", "Lon", "LatAccel",
-    "Alt", "LongAccel", "OnPitRoad", "IsOnTrack", "LFtempCL", "RFtempCL", "LRtempCL", "RRtempCL",
+    "Alt", "LongAccel", "OnPitRoad", "IsOnTrack",
     "YawRate", "BrakeABSactive", "PlayerTrackSurface", "PlayerCarMyIncidentCount", "BrakeRaw", "VelocityX", "VelocityY", "FuelLevel", "FuelUsePerHour",
     "dcBrakeBias", "dcABS", "dcTractionControl", "TrackTempCrew", "TrackTemp", "AirTemp", "TrackWetness",
     "Precipitation", "Skies", "WindVel", "WindDir", "RelativeHumidity", "WeatherDeclaredWet",
@@ -314,7 +255,7 @@ pub fn write_fixture(input: &Path, out: Option<&Path>, laps: usize) -> Result<St
     let crossings: Vec<usize> = (1..frames.len())
         .filter(|&i| frames[i - 1].pct > 0.9 && frames[i].pct < 0.1 && frames[i].time - frames[i - 1].time < 1.0)
         .collect();
-    let clean = |a: usize, b: usize| crate::trace::is_continuous(&frames[a..b]);
+    let clean = |a: usize, b: usize| crate::telemetry::trace::is_continuous(&frames[a..b]);
     let wanted = laps.min(crossings.len().saturating_sub(1));
     if wanted == 0 {
         bail!("{} has no complete lap to export", input.display());
@@ -391,13 +332,8 @@ pub fn write_fixture(input: &Path, out: Option<&Path>, laps: usize) -> Result<St
     let out_path = match out {
         Some(path) => path.to_path_buf(),
         None => {
-            let slug: String = track
-                .track_name
-                .to_ascii_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect();
-            let slug = if slug.trim_matches('-').is_empty() { "track".to_string() } else { slug.trim_matches('-').to_string() };
+            let slug = crate::telemetry::track::slug(&track.track_name);
+            let slug = if slug.is_empty() { "track".to_string() } else { slug };
             Path::new("tests").join("fixtures").join(format!("{slug}.ibt"))
         }
     };
@@ -408,7 +344,7 @@ pub fn write_fixture(input: &Path, out: Option<&Path>, laps: usize) -> Result<St
 
     // Read it back through the normal pipeline as a check.
     let check = read_ibt(&out_path)?;
-    let run = crate::trace::build_run(&check.frames, &check.track);
+    let run = crate::telemetry::trace::build_run(&check.frames, &check.track);
     let times: Vec<String> = run
         .laps
         .iter()

@@ -3,8 +3,8 @@
 
 use serde::Serialize;
 
-use crate::types::LapMetrics;
-use crate::weather::{lap_weather, WeatherSample, WeatherSnapshot};
+use crate::telemetry::balance::add_balance;
+use crate::telemetry::weather::{lap_weather, WeatherSample, WeatherSnapshot};
 
 /// One telemetry sample. Missing channels are NaN.
 #[derive(Debug, Clone, Copy)]
@@ -23,9 +23,6 @@ pub struct Frame {
     pub on_pit_road: bool,
     /// iRacing's official time for the previous lap (updates shortly after the line).
     pub last_lap_time: f32,
-    pub tyre_avg: f32,
-    pub tyre_min: f32,
-    pub tyre_max: f32,
     /// Lateral / longitudinal acceleration in m/s² (iRacing's `LatAccel`/`LongAccel`, which
     /// include gravity, so banking and slopes show up too).
     pub lat_accel: f32,
@@ -45,6 +42,61 @@ pub struct Frame {
     pub weather: WeatherSample,
 }
 
+/// Everything read from one recording: an .ibt file or a live session.
+pub struct Capture {
+    pub track: TrackInfo,
+    pub frames: Vec<Frame>,
+}
+
+/// Telemetry channels read into a `Frame`, in the order `Frame::from_channels` expects.
+/// `YawNorth` is preferred over `Yaw` (which has a per-track offset).
+const FRAME_CHANNELS: [&str; 22] = [
+    "SessionTime", "Lap", "LapDistPct", "Speed", "Throttle", "Brake", "Gear", "SteeringWheelAngle", "YawNorth",
+    "Yaw", "Lat", "Lon", "OnPitRoad", "LapLastLapTime", "LatAccel", "LongAccel", "YawRate", "BrakeABSactive",
+    "PlayerTrackSurface", "PlayerCarMyIncidentCount", "RPM", "Alt",
+];
+
+/// Every channel a `Frame` needs, frame channels first then the weather ones: the index
+/// space of `Frame::from_channels`.
+pub fn channel_names() -> impl Iterator<Item = &'static str> {
+    FRAME_CHANNELS.into_iter().chain(crate::telemetry::weather::CHANNELS)
+}
+
+impl Frame {
+    /// Builds a frame from `get(i)`, the value of the `i`th entry of `channel_names()`
+    /// (None when the source lacks it).
+    pub fn from_channels(get: impl Fn(usize) -> Option<f64>) -> Self {
+        let values: [Option<f64>; FRAME_CHANNELS.len()] = std::array::from_fn(&get);
+        let [time, lap, pct, speed, throttle, brake, gear, steer, yaw_north, yaw, lat, lon, pit, last_lap, lat_accel, long_accel, yaw_rate, abs, surface, incidents, rpm, alt] =
+            values;
+        let nan = |v: Option<f64>| v.unwrap_or(f64::NAN);
+        Self {
+            time: nan(time),
+            lap: lap.unwrap_or(0.0) as i32,
+            pct: nan(pct),
+            speed_ms: nan(speed) as f32,
+            throttle: nan(throttle) as f32,
+            brake: nan(brake) as f32,
+            gear: gear.unwrap_or(0.0) as i32,
+            steer_rad: nan(steer) as f32,
+            yaw: nan(yaw_north.or(yaw)) as f32,
+            lat: nan(lat),
+            lon: nan(lon),
+            on_pit_road: pit.unwrap_or(0.0) != 0.0,
+            last_lap_time: nan(last_lap) as f32,
+            lat_accel: nan(lat_accel) as f32,
+            long_accel: nan(long_accel) as f32,
+            yaw_rate: nan(yaw_rate) as f32,
+            abs_active: nan(abs) as f32,
+            track_surface: surface.map(|v| v as i8),
+            incidents: nan(incidents) as f32,
+            rpm: nan(rpm) as f32,
+            alt: nan(alt) as f32,
+            weather: WeatherSample::from_channels(|i| get(FRAME_CHANNELS.len() + i)),
+        }
+    }
+}
+
 impl Default for Frame {
     fn default() -> Self {
         Self {
@@ -61,9 +113,6 @@ impl Default for Frame {
             lon: f64::NAN,
             on_pit_road: false,
             last_lap_time: f32::NAN,
-            tyre_avg: f32::NAN,
-            tyre_min: f32::NAN,
-            tyre_max: f32::NAN,
             lat_accel: f32::NAN,
             long_accel: f32::NAN,
             yaw_rate: f32::NAN,
@@ -135,6 +184,43 @@ pub struct Turn {
     pub pct: f64,
 }
 
+/// Each turn owns the stretch from halfway after the previous turn to halfway to the next,
+/// matching the UI's corner table.
+pub fn turn_segments(turns: &[Turn]) -> Vec<(f64, f64, f64)> {
+    (0..turns.len())
+        .map(|i| {
+            let start = if i == 0 { 0.0 } else { (turns[i - 1].pct + turns[i].pct) / 2.0 };
+            let end = if i + 1 == turns.len() { 1.0 } else { (turns[i].pct + turns[i + 1].pct) / 2.0 };
+            (start, turns[i].pct, end)
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LapMetrics {
+    pub lap_number: i32,
+    pub lap_time_s: f64,
+    pub is_complete: bool,
+    /// Sector times in order. Empty when the source has no sector data.
+    pub sectors: Vec<f64>,
+    pub avg_speed_kph: Option<f64>,
+    /// Lap fractions where the car left the track. Empty when it stayed on, or when the
+    /// source has no track-surface channel.
+    pub off_track_pcts: Vec<f64>,
+    /// Incident points picked up during the lap. `None` when the source has no incident count.
+    pub incidents: Option<u32>,
+    /// Average air and track temperature over the lap, and the wettest the track got
+    /// (`TrackWetness`: 1 dry … 7 extremely wet). `None` when the source has no weather channels.
+    pub air_temp_c: Option<f64>,
+    pub track_temp_c: Option<f64>,
+    pub track_wetness: Option<u8>,
+    /// Top speed in kph, and the share of the lap (%) at full throttle and on the brakes.
+    /// `None` when the source has no speed / pedal channels.
+    pub top_speed_kph: Option<f64>,
+    pub full_throttle_pct: Option<f64>,
+    pub braking_pct: Option<f64>,
+}
+
 pub struct RunData {
     pub laps: Vec<LapMetrics>,
     pub traces: Vec<LapTrace>,
@@ -145,7 +231,7 @@ pub struct RunData {
 }
 
 /// Grid used for traces and the map: roughly one point every 3 m.
-pub fn grid_size(length_m: f64) -> usize {
+fn grid_size(length_m: f64) -> usize {
     if length_m > 0.0 {
         ((length_m / 3.0).round() as usize).clamp(400, 4000)
     } else {
@@ -200,7 +286,7 @@ const SURFACE_OFF_TRACK: i8 = 0;
 
 /// Top speed in kph, and the share of the lap (%) spent at full throttle and on the brakes.
 /// Samples are evenly spaced in time, so a share of samples is a share of the lap time.
-pub(crate) fn lap_driving(frames: &[Frame]) -> (Option<f64>, Option<f64>, Option<f64>) {
+fn lap_driving(frames: &[Frame]) -> (Option<f64>, Option<f64>, Option<f64>) {
     let top = frames.iter().map(|f| f.speed_ms).filter(|v| v.is_finite()).fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v))));
     let share = |value: fn(&Frame) -> f32, on: fn(f32) -> bool| {
         let known: Vec<f32> = frames.iter().map(value).filter(|v| v.is_finite()).collect();
@@ -216,12 +302,12 @@ pub(crate) fn lap_driving(frames: &[Frame]) -> (Option<f64>, Option<f64>, Option
 /// Where the lap went off track (one lap fraction per excursion; brief returns to the
 /// surface within a second count as the same excursion) and how many incident points it
 /// picked up. `prev` is the last frame before the lap, the baseline for the incident count.
-pub(crate) fn lap_off_tracks(prev: Option<&Frame>, frames: &[Frame]) -> (Vec<f64>, Option<u32>) {
+fn lap_off_tracks(prev: Option<&Frame>, frames: &[Frame]) -> (Vec<f64>, Option<u32>) {
     let mut pcts = Vec::new();
     let mut last_off: Option<f64> = None;
     for f in frames {
         if f.track_surface == Some(SURFACE_OFF_TRACK) && !f.on_pit_road {
-            if last_off.map_or(true, |t| f.time - t > 1.0) && f.pct.is_finite() {
+            if last_off.is_none_or(|t| f.time - t > 1.0) && f.pct.is_finite() {
                 pcts.push(f.pct);
             }
             last_off = Some(f.time);
@@ -361,13 +447,18 @@ fn time_at(points: &[GridPoint], pct: f64) -> Option<f64> {
     Some(a.time + (b.time - a.time) * t)
 }
 
-pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
-    let n = grid_size(track.length_m);
+/// A stretch of frames between two line crossings (or gaps/resets): `frames[start..end]`.
+struct Segment {
+    start: usize,
+    end: usize,
+    number: i32,
+}
 
-    // Split into laps at line crossings (lap distance wrapping from ~1 to ~0). iRacing's
-    // Lap counter is used for numbering when it counts, but it isn't relied on: some
-    // sessions leave it at 0. Recording gaps and resets also start a new segment.
-    let mut groups: Vec<(usize, usize, i32)> = Vec::new();
+/// Split into laps at line crossings (lap distance wrapping from ~1 to ~0). iRacing's Lap
+/// counter is used for numbering when it counts, but it isn't relied on: some sessions leave
+/// it at 0. Recording gaps and resets also start a new segment.
+fn segment_laps(frames: &[Frame]) -> Vec<Segment> {
+    let mut segments = Vec::new();
     let mut start = 0;
     let mut number = frames.first().map(|f| f.lap.max(1)).unwrap_or(1);
     for i in 1..=frames.len() {
@@ -378,196 +469,209 @@ pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
             crossed || jumped || b.lap != a.lap
         };
         if boundary {
-            groups.push((start, i, number));
+            segments.push(Segment { start, end: i, number });
             if i < frames.len() {
                 number = if frames[i].lap > number { frames[i].lap } else { number + 1 };
             }
             start = i;
         }
     }
+    segments
+}
 
-    let mut laps = Vec::new();
-    let mut resampled: Vec<Resampled> = Vec::new();
+/// A lap's start time and duration, when the frames either side of it let the line
+/// crossings be found.
+struct LapTiming {
+    start_time: f64,
+    lap_time_s: f64,
+}
 
-    for &(s, e, lap_number) in &groups {
-        let lap_frames = &frames[s..e];
-        if lap_frames.len() < 2 {
-            continue;
-        }
-        // Skip segments where the car was parked (garage, pit box, paused).
-        let covered: f64 = lap_frames.windows(2).map(|w| (w[1].pct - w[0].pct).max(0.0)).sum();
-        if covered < 0.05 {
-            continue;
-        }
+/// Times a segment from the line crossings at its ends, preferring iRacing's own lap time so
+/// numbers match the sim (our interpolation can be a frame, ~17 ms, off).
+fn lap_timing(frames: &[Frame], seg: &Segment) -> Option<LapTiming> {
+    let lap_frames = &frames[seg.start..seg.end];
+    let prev = frames.get(seg.start.checked_sub(1)?)?;
+    let next = frames.get(seg.end)?;
+    let t0 = line_crossing(prev, &lap_frames[0])?;
+    let t1 = line_crossing(&lap_frames[lap_frames.len() - 1], next)?;
+    let lap_time_s = match official_lap_time(frames, seg.end) {
+        Some(official) if (official - (t1 - t0)).abs() < 0.25 => official,
+        _ => t1 - t0,
+    };
+    Some(LapTiming { start_time: t0, lap_time_s })
+}
 
-        let prev = (s > 0).then(|| &frames[s - 1]);
-        let next = (e < frames.len()).then(|| &frames[e]);
-        let start_time = prev.and_then(|p| line_crossing(p, &lap_frames[0]));
-        let end_time = next.and_then(|nx| line_crossing(&lap_frames[lap_frames.len() - 1], nx));
-
-        let tyre_avgs: Vec<f64> = lap_frames.iter().map(|f| f.tyre_avg as f64).filter(|v| !v.is_nan()).collect();
-        let tyre_min = lap_frames.iter().map(|f| f.tyre_min).filter(|v| !v.is_nan()).fold(f32::INFINITY, f32::min);
-        let tyre_max = lap_frames.iter().map(|f| f.tyre_max).filter(|v| !v.is_nan()).fold(f32::NEG_INFINITY, f32::max);
-        let speeds: Vec<f64> = lap_frames.iter().map(|f| f.speed_ms as f64).filter(|v| !v.is_nan()).collect();
-
-        // iRacing only refreshes tyre temperatures in the pit stall, so on track the values are
-        // frozen. Only report them if they actually changed during the lap: the four tyres
-        // always differ from each other, so it's the average over time that has to move.
-        let avg_lo = tyre_avgs.iter().copied().fold(f64::INFINITY, f64::min);
-        let avg_hi = tyre_avgs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let tyres_live = avg_hi - avg_lo > 0.05;
-        let tyre_temp_avg_c = (tyres_live && !tyre_avgs.is_empty()).then(|| tyre_avgs.iter().sum::<f64>() / tyre_avgs.len() as f64);
-        let tyre_temp_delta_c = tyres_live.then(|| (tyre_max - tyre_min) as f64);
-        let avg_speed_kph = (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64 * 3.6);
-        let (off_track_pcts, incidents) = lap_off_tracks(prev, lap_frames);
-        let (air_temp_c, track_temp_c, track_wetness) = lap_weather(lap_frames);
-        let (top_speed_kph, full_throttle_pct, braking_pct) = lap_driving(lap_frames);
-
-        let (Some(t0), Some(t1)) = (start_time, end_time) else {
-            laps.push(LapMetrics {
-                lap_number,
-                lap_time_s: lap_frames[lap_frames.len() - 1].time - lap_frames[0].time,
-                is_complete: false,
-                sectors: Vec::new(),
-                avg_speed_kph,
-                tyre_temp_avg_c,
-                tyre_temp_delta_c,
-                off_track_pcts,
-                incidents,
-                air_temp_c,
-                track_temp_c,
-                track_wetness,
-                top_speed_kph,
-                full_throttle_pct,
-                braking_pct,
-            });
-            continue;
-        };
-
-        let complete = is_continuous(lap_frames);
-        // Prefer iRacing's own lap time so numbers match the sim; our line-crossing
-        // interpolation can be a frame (~17 ms) off.
-        let lap_time_s = match official_lap_time(frames, e) {
-            Some(official) if (official - (t1 - t0)).abs() < 0.25 => official,
-            _ => t1 - t0,
-        };
-
-        // Increasing-pct points with virtual start/end points exactly on the line.
-        let mut points: Vec<GridPoint> = Vec::with_capacity(lap_frames.len() + 2);
-        points.push(GridPoint { pct: 0.0, time: 0.0, frame: lap_frames[0], yaw_unwrapped: 0.0 });
-        for f in lap_frames {
-            if f.pct > points.last().map(|p| p.pct).unwrap_or(0.0) && f.pct < 1.0 {
-                let time = (f.time - t0).clamp(0.0, lap_time_s);
-                points.push(GridPoint { pct: f.pct, time, frame: *f, yaw_unwrapped: 0.0 });
-            }
-        }
-        points.push(GridPoint { pct: 1.0, time: lap_time_s, frame: lap_frames[lap_frames.len() - 1], yaw_unwrapped: 0.0 });
-
-        // Unwrap heading so interpolation never swings the long way round.
-        let mut offset = 0.0;
-        let mut last_raw = points[0].frame.yaw as f64;
-        for p in points.iter_mut() {
-            let raw = p.frame.yaw as f64;
-            if !raw.is_nan() && !last_raw.is_nan() {
-                let d = raw - last_raw;
-                if d > std::f64::consts::PI {
-                    offset -= std::f64::consts::TAU;
-                } else if d < -std::f64::consts::PI {
-                    offset += std::f64::consts::TAU;
-                }
-            }
-            if !raw.is_nan() {
-                last_raw = raw;
-            }
-            p.yaw_unwrapped = raw + offset;
-        }
-
-        let sectors = if complete && track.sector_pcts.len() > 1 {
-            let mut bounds: Vec<f64> = track.sector_pcts.iter().copied().filter(|p| *p > 0.0 && *p < 1.0).collect();
-            bounds.push(1.0);
-            let mut sectors = Vec::with_capacity(bounds.len());
-            let mut prev_time = 0.0;
-            for b in bounds {
-                let t = if b >= 1.0 { lap_time_s } else { time_at(&points, b).unwrap_or(prev_time) };
-                sectors.push(t - prev_time);
-                prev_time = t;
-            }
-            sectors
-        } else {
-            Vec::new()
-        };
-
-        laps.push(LapMetrics {
-            lap_number,
-            lap_time_s,
-            is_complete: complete,
-            sectors,
-            avg_speed_kph: if complete && track.length_m > 0.0 {
-                Some(track.length_m / lap_time_s * 3.6)
-            } else {
-                avg_speed_kph
-            },
-            tyre_temp_avg_c,
-            tyre_temp_delta_c,
-            off_track_pcts,
-            incidents,
-            air_temp_c,
-            track_temp_c,
-            track_wetness,
-            top_speed_kph,
-            full_throttle_pct,
-            braking_pct,
-        });
-
-        if complete {
-            resampled.push(resample(&points, lap_number, n));
+/// Increasing-pct points with virtual start/end points exactly on the line. Heading is not
+/// unwrapped yet (see `unwrap_heading`).
+fn lap_points(lap_frames: &[Frame], timing: &LapTiming) -> Vec<GridPoint> {
+    let mut points: Vec<GridPoint> = Vec::with_capacity(lap_frames.len() + 2);
+    points.push(GridPoint { pct: 0.0, time: 0.0, frame: lap_frames[0], yaw_unwrapped: 0.0 });
+    for f in lap_frames {
+        if f.pct > points.last().map(|p| p.pct).unwrap_or(0.0) && f.pct < 1.0 {
+            let time = (f.time - timing.start_time).clamp(0.0, timing.lap_time_s);
+            points.push(GridPoint { pct: f.pct, time, frame: *f, yaw_unwrapped: 0.0 });
         }
     }
+    points.push(GridPoint {
+        pct: 1.0,
+        time: timing.lap_time_s,
+        frame: lap_frames[lap_frames.len() - 1],
+        yaw_unwrapped: 0.0,
+    });
+    points
+}
 
+/// Unwrap heading so interpolation never swings the long way round.
+fn unwrap_heading(points: &mut [GridPoint]) {
+    let mut offset = 0.0;
+    let mut last_raw = points[0].frame.yaw as f64;
+    for p in points.iter_mut() {
+        let raw = p.frame.yaw as f64;
+        if !raw.is_nan() && !last_raw.is_nan() {
+            let d = raw - last_raw;
+            if d > std::f64::consts::PI {
+                offset -= std::f64::consts::TAU;
+            } else if d < -std::f64::consts::PI {
+                offset += std::f64::consts::TAU;
+            }
+        }
+        if !raw.is_nan() {
+            last_raw = raw;
+        }
+        p.yaw_unwrapped = raw + offset;
+    }
+}
+
+/// Sector durations from the lap's points. Empty without sector boundaries.
+fn sector_times(points: &[GridPoint], lap_time_s: f64, sector_pcts: &[f64]) -> Vec<f64> {
+    if sector_pcts.len() < 2 {
+        return Vec::new();
+    }
+    let mut bounds: Vec<f64> = sector_pcts.iter().copied().filter(|p| *p > 0.0 && *p < 1.0).collect();
+    bounds.push(1.0);
+    let mut sectors = Vec::with_capacity(bounds.len());
+    let mut prev_time = 0.0;
+    for b in bounds {
+        let t = if b >= 1.0 { lap_time_s } else { time_at(points, b).unwrap_or(prev_time) };
+        sectors.push(t - prev_time);
+        prev_time = t;
+    }
+    sectors
+}
+
+/// One lap's metrics, plus its distance-ordered points when it was timed and driven
+/// continuously (the only laps that get a trace).
+struct AnalysedLap {
+    metrics: LapMetrics,
+    points: Option<Vec<GridPoint>>,
+}
+
+fn analyse_lap(frames: &[Frame], seg: &Segment, track: &TrackInfo) -> Option<AnalysedLap> {
+    let lap_frames = &frames[seg.start..seg.end];
+    if lap_frames.len() < 2 {
+        return None;
+    }
+    // Skip segments where the car was parked (garage, pit box, paused).
+    let covered: f64 = lap_frames.windows(2).map(|w| (w[1].pct - w[0].pct).max(0.0)).sum();
+    if covered < 0.05 {
+        return None;
+    }
+
+    let prev = seg.start.checked_sub(1).map(|i| &frames[i]);
+    let timing = lap_timing(frames, seg);
+    let complete = timing.is_some() && is_continuous(lap_frames);
+    let points = timing.as_ref().filter(|_| complete).map(|t| lap_points(lap_frames, t));
+    let lap_time_s = match &timing {
+        Some(t) => t.lap_time_s,
+        None => lap_frames[lap_frames.len() - 1].time - lap_frames[0].time,
+    };
+    let sectors = points.as_deref().map(|p| sector_times(p, lap_time_s, &track.sector_pcts)).unwrap_or_default();
+
+    let avg_speed_kph = if complete && track.length_m > 0.0 {
+        Some(track.length_m / lap_time_s * 3.6)
+    } else {
+        let speeds: Vec<f64> = lap_frames.iter().map(|f| f.speed_ms as f64).filter(|v| !v.is_nan()).collect();
+        (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64 * 3.6)
+    };
+    let (off_track_pcts, incidents) = lap_off_tracks(prev, lap_frames);
+    let (air_temp_c, track_temp_c, track_wetness) = lap_weather(lap_frames);
+    let (top_speed_kph, full_throttle_pct, braking_pct) = lap_driving(lap_frames);
+
+    let metrics = LapMetrics {
+        lap_number: seg.number,
+        lap_time_s,
+        is_complete: complete,
+        sectors,
+        avg_speed_kph,
+        off_track_pcts,
+        incidents,
+        air_temp_c,
+        track_temp_c,
+        track_wetness,
+        top_speed_kph,
+        full_throttle_pct,
+        braking_pct,
+    };
+    Some(AnalysedLap { metrics, points })
+}
+
+/// Every lap in the recording, in the order driven.
+fn analyse_laps(frames: &[Frame], track: &TrackInfo) -> Vec<AnalysedLap> {
+    let mut laps: Vec<AnalysedLap> = segment_laps(frames).iter().filter_map(|seg| analyse_lap(frames, seg, track)).collect();
     // Without a working lap counter, number laps 1, 2, 3… in the order driven.
     if frames.iter().all(|f| f.lap <= 0) {
         for (i, lap) in laps.iter_mut().enumerate() {
-            let old = lap.lap_number;
-            lap.lap_number = i as i32 + 1;
-            if let Some(r) = resampled.iter_mut().find(|r| r.trace.lap_number == old) {
-                r.trace.lap_number = lap.lap_number;
-            }
+            lap.metrics.lap_number = i as i32 + 1;
         }
     }
+    laps
+}
 
-    // Build the outline from the fastest clean lap.
+/// Per-lap metrics only: the cheap path for live recording, which republishes laps as they
+/// finish and has no use for traces or the map.
+pub fn lap_metrics(frames: &[Frame], track: &TrackInfo) -> Vec<LapMetrics> {
+    analyse_laps(frames, track).into_iter().map(|lap| lap.metrics).collect()
+}
+
+/// The track outline from the fastest clean lap: GPS when it has it, else dead-reckoned
+/// from heading. The flag is true for GPS.
+fn choose_outline(resampled: &[Resampled], track: &TrackInfo, n: usize) -> (Option<Vec<[f32; 2]>>, bool) {
     let best = resampled
         .iter()
         .min_by(|a, b| a.trace.time_s[n].partial_cmp(&b.trace.time_s[n]).unwrap_or(std::cmp::Ordering::Equal));
-    let (map_points, map_from_gps) = match best {
-        Some(best) => {
-            let has_gps = best.lat.iter().all(|v| v.is_finite() && *v != 0.0);
-            if has_gps {
-                (Some(outline_from_gps(&best.lat, &best.lon)), true)
-            } else if best.yaw.iter().all(|v| v.is_finite()) {
-                let length = if track.length_m > 0.0 {
-                    track.length_m
-                } else {
-                    best.trace.speed_kph.iter().map(|v| *v as f64 / 3.6).sum::<f64>() / n as f64
-                        * best.trace.time_s[n] as f64
-                };
-                (Some(outline_from_heading(&best.yaw, length)), false)
-            } else {
-                (None, false)
-            }
-        }
-        None => (None, false),
-    };
-
-    let mut traces: Vec<LapTrace> = resampled.into_iter().map(|r| r.trace).collect();
-    crate::handling::add_balance(&mut traces);
-
-    RunData {
-        laps,
-        traces,
-        map_points,
-        map_from_gps,
+    let Some(best) = best else { return (None, false) };
+    if best.lat.iter().all(|v| v.is_finite() && *v != 0.0) {
+        (Some(outline_from_gps(&best.lat, &best.lon)), true)
+    } else if best.yaw.iter().all(|v| v.is_finite()) {
+        let length = if track.length_m > 0.0 {
+            track.length_m
+        } else {
+            best.trace.speed_kph.iter().map(|v| *v as f64 / 3.6).sum::<f64>() / n as f64 * best.trace.time_s[n] as f64
+        };
+        (Some(outline_from_heading(&best.yaw, length)), false)
+    } else {
+        (None, false)
     }
+}
+
+/// Laps, distance-based traces and the track outline for a recording.
+pub fn build_run(frames: &[Frame], track: &TrackInfo) -> RunData {
+    let n = grid_size(track.length_m);
+    let mut laps = Vec::new();
+    let mut resampled = Vec::new();
+    for lap in analyse_laps(frames, track) {
+        if let Some(mut points) = lap.points {
+            unwrap_heading(&mut points);
+            resampled.push(resample(&points, lap.metrics.lap_number, n));
+        }
+        laps.push(lap.metrics);
+    }
+
+    let (map_points, map_from_gps) = choose_outline(&resampled, track, n);
+    let mut traces: Vec<LapTrace> = resampled.into_iter().map(|r| r.trace).collect();
+    add_balance(&mut traces);
+
+    RunData { laps, traces, map_points, map_from_gps }
 }
 
 fn outline_from_gps(lat: &[f64], lon: &[f64]) -> Vec<[f32; 2]> {
@@ -735,7 +839,7 @@ mod tests {
 
     #[test]
     fn fixture_laps_match_iracing() {
-        let data = crate::ibt::read_ibt(Path::new(FIXTURE)).expect("read fixture");
+        let data = crate::telemetry::ibt::read_ibt(Path::new(FIXTURE)).expect("read fixture");
         assert_eq!(data.track.display_name, "Road Atlanta");
         assert_eq!(data.track.car, "Dallara P217 LMP2");
         assert_eq!(data.track.sector_pcts.len(), 4);
@@ -754,8 +858,6 @@ mod tests {
         // The partial laps either side of the timed run are kept but not timed.
         assert!(run.laps.iter().any(|lap| !lap.is_complete));
         assert_eq!(run.traces.len(), timed.len());
-        // Tyre temps are frozen on track in iRacing, so they're dropped.
-        assert!(timed.iter().all(|lap| lap.tyre_temp_avg_c.is_none()));
         for lap in &timed {
             let (top, full, brake) = (lap.top_speed_kph.unwrap(), lap.full_throttle_pct.unwrap(), lap.braking_pct.unwrap());
             assert!((200.0..350.0).contains(&top), "lap {} top speed {top}", lap.lap_number);
@@ -766,7 +868,7 @@ mod tests {
 
     #[test]
     fn fixture_live_map_matches_gps() {
-        let data = crate::ibt::read_ibt(Path::new(FIXTURE)).expect("read fixture");
+        let data = crate::telemetry::ibt::read_ibt(Path::new(FIXTURE)).expect("read fixture");
         let rms = heading_vs_gps_rms(&data.frames, &data.track);
         assert!(rms < 15.0, "heading outline is {rms:.1} m RMS from GPS");
 
@@ -806,7 +908,7 @@ mod tests {
     fn fixtures_have_timed_laps_sectors_and_accurate_live_maps() {
         for path in all_fixtures() {
             let name = path.display();
-            let data = crate::ibt::read_ibt(&path).expect("read fixture");
+            let data = crate::telemetry::ibt::read_ibt(&path).expect("read fixture");
             assert!(!data.track.display_name.is_empty(), "{name}: no track name");
             let run = build_run(&data.frames, &data.track);
             let timed: Vec<&LapMetrics> = run.laps.iter().filter(|lap| lap.is_complete).collect();
@@ -827,7 +929,7 @@ mod tests {
 
     #[test]
     fn watkins_glen_laps_match_iracing() {
-        let data = crate::ibt::read_ibt(Path::new("tests/fixtures/watkinsglen-2021-fullcourse.ibt")).expect("read fixture");
+        let data = crate::telemetry::ibt::read_ibt(Path::new("tests/fixtures/watkinsglen-2021-fullcourse.ibt")).expect("read fixture");
         let run = build_run(&data.frames, &data.track);
         let timed: Vec<f64> = run.laps.iter().filter(|lap| lap.is_complete).map(|lap| lap.lap_time_s).collect();
         // iRacing's own LapLastLapTime values for these laps.
@@ -844,7 +946,7 @@ mod tests {
     #[ignore]
     fn outline_matches_gps() {
         let path = std::env::var("PCC_IBT").expect("set PCC_IBT");
-        let data = crate::ibt::read_ibt(Path::new(&path)).unwrap();
+        let data = crate::telemetry::ibt::read_ibt(Path::new(&path)).unwrap();
         println!("{} ({}), {:.0} m, sectors {:?}", data.track.display_name, data.track.car, data.track.length_m, data.track.sector_pcts);
         for lap in build_run(&data.frames, &data.track).laps {
             println!("lap {:>3} {:>8.3}s timed={} sectors={:?}", lap.lap_number, lap.lap_time_s, lap.is_complete, lap.sectors);
@@ -852,30 +954,6 @@ mod tests {
         let rms = heading_vs_gps_rms(&data.frames, &data.track);
         println!("heading vs GPS outline: {rms:.1} m RMS");
         assert!(rms < 30.0);
-    }
-
-    #[test]
-    fn frozen_tyre_temps_are_dropped() {
-        // Two and a half laps at 10 Hz. Tyres differ from each other (60–69C) but, as on track
-        // in iRacing, never change; then the same run with temperatures that do move.
-        let frames = |rise: f32| -> Vec<Frame> {
-            (0..250)
-                .map(|i| Frame {
-                    time: i as f64 * 0.1,
-                    pct: (i as f64 / 100.0 + 0.5) % 1.0,
-                    lap: 1 + (i + 50) / 100,
-                    tyre_avg: 64.5 + rise * i as f32,
-                    tyre_min: 60.0 + rise * i as f32,
-                    tyre_max: 69.0 + rise * i as f32,
-                    ..Frame::default()
-                })
-                .collect()
-        };
-        let frozen = build_run(&frames(0.0), &TrackInfo::default());
-        assert!(!frozen.laps.is_empty());
-        assert!(frozen.laps.iter().all(|lap| lap.tyre_temp_avg_c.is_none() && lap.tyre_temp_delta_c.is_none()));
-        let live = build_run(&frames(0.01), &TrackInfo::default());
-        assert!(live.laps.iter().all(|lap| lap.tyre_temp_avg_c.is_some()));
     }
 
     #[test]

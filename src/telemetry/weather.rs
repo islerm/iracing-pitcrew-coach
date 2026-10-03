@@ -4,8 +4,9 @@
 
 use serde::Serialize;
 
-use crate::trace::Frame;
-use crate::types::LapMetrics;
+use crate::stats::{finite_max, mean};
+use crate::telemetry::trace::Frame;
+use crate::telemetry::trace::LapMetrics;
 
 /// Telemetry channels read into `WeatherSample`, in `from_channels` order.
 pub const CHANNELS: [&str; 10] = [
@@ -202,11 +203,6 @@ fn compass(rad: f64) -> String {
     POINTS[((deg / 45.0).round() as usize) % 8].to_string()
 }
 
-fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
-    let (sum, n) = values.filter(|v| v.is_finite()).fold((0.0, 0usize), |(s, n), v| (s + v, n + 1));
-    (n > 0).then(|| sum / n as f64)
-}
-
 /// First and last labels of a coded channel; the end is only kept when it differs.
 fn start_end(frames: &[Frame], code: impl Fn(&Frame) -> f32, label: fn(f64) -> Option<&'static str>) -> (Option<String>, Option<String>) {
     let mut labels = frames.iter().filter_map(|f| label(code(f) as f64));
@@ -234,12 +230,7 @@ pub fn session_weather(frames: &[Frame], snap: &WeatherSnapshot) -> Option<Sessi
         skies = Some(snap.skies.clone());
     }
     let (wetness, wetness_end) = start_end(frames, |f| f.weather.wetness, wetness_label);
-    let rain = frames
-        .iter()
-        .map(|f| f.weather.precipitation as f64 * 100.0)
-        .filter(|v| v.is_finite())
-        .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
-        .or(snap.precipitation_pct);
+    let rain = finite_max(frames.iter().map(|f| f.weather.precipitation as f64 * 100.0)).or(snap.precipitation_pct);
 
     let weather = SessionWeather {
         weather_type: Some(snap.weather_type.clone()).filter(|s| !s.is_empty()),
@@ -265,12 +256,7 @@ pub fn session_weather(frames: &[Frame], snap: &WeatherSnapshot) -> Option<Sessi
 pub fn lap_weather(frames: &[Frame]) -> (Option<f64>, Option<f64>, Option<u8>) {
     let air = mean(frames.iter().map(|f| f.weather.air_temp_c as f64));
     let track = mean(frames.iter().map(|f| f.weather.track_temp_c as f64));
-    let wet = frames
-        .iter()
-        .map(|f| f.weather.wetness)
-        .filter(|v| v.is_finite() && *v >= 1.0)
-        .fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v))))
-        .map(|v| v.round() as u8);
+    let wet = finite_max(frames.iter().map(|f| f.weather.wetness as f64).filter(|v| *v >= 1.0)).map(|v| v.round() as u8);
     (air, track, wet)
 }
 

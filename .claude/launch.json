@@ -4,13 +4,13 @@
     {
       "name": "pitcrew-ui",
       "runtimeExecutable": "cargo",
-      "runtimeArgs": ["run", "--", "--ui", "--ui-port", "8787"],
+      "runtimeArgs": ["run", "--", "--ui-port", "8787"],
       "port": 8787
     },
     {
       "name": "pitcrew-ui-replay",
       "runtimeExecutable": "cargo",
-      "runtimeArgs": ["run", "--release", "--", "--ui", "--ui-port", "8790", "--replay", "tests/fixtures/roadatlanta-full.ibt", "--replay-speed", "8"],
+      "runtimeArgs": ["run", "--release", "--", "--ui-port", "8790", "--replay", "tests/fixtures/roadatlanta-full.ibt", "--replay-speed", "8"],
       "port": 8790
     }
   ]

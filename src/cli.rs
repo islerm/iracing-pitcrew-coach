@@ -4,41 +4,25 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Local iRacing pit-crew coach")]
 pub struct Cli {
-    #[arg(long, value_name = "FILE", help = "An .ibt telemetry file or a lap CSV to summarize")]
-    pub file: Option<PathBuf>,
-
-    #[arg(
-        long,
-        value_name = "DIR",
-        help = "Summarize every .ibt/.csv in this folder together (default: the iRacing telemetry folder)"
-    )]
-    pub dir: Option<PathBuf>,
-
-    #[arg(long, help = "Connect to live iRacing telemetry instead of reading recorded files")]
-    pub live: bool,
-
-    #[arg(long, default_value_t = 15, help = "How long to sample live telemetry, in seconds")]
-    pub live_duration_sec: u64,
-
-    #[arg(long, help = "Start the local web UI server")]
-    pub ui: bool,
-
     #[arg(long, default_value_t = 8787, help = "Port for the web UI server")]
     pub ui_port: u16,
 
     #[arg(long, default_value = "llama3.2", help = "Ollama model to use for coaching")]
     pub model: String,
 
-    #[arg(long, help = "Speak the summary out loud with TTS if available")]
-    pub talk: bool,
+    #[arg(long, value_enum, default_value = "piper", help = "Voice engine for the coach: piper (fast), kokoro (more natural, slower) or espeak")]
+    pub tts: crate::voice::Tts,
 
-    #[arg(long, default_value = "en-us", help = "Voice to use with espeak-ng or espeak")]
-    pub voice: String,
+    #[arg(
+        long,
+        help = "Voice name for the engine. Piper: en_GB-cori-high (default), en_GB-jenny_dioco-medium, en_GB-alba-medium. Kokoro: bf_emma (default), bf_isabella, bm_george"
+    )]
+    pub voice: Option<String>,
 
     #[arg(
         long,
         value_name = "IBT",
-        help = "With --ui: 'Start recording' replays this .ibt as if it were live iRacing (no sim needed)"
+        help = "'Start recording' replays this .ibt as if it were live iRacing (no sim needed)"
     )]
     pub replay: Option<PathBuf>,
 
