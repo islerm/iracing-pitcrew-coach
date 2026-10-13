@@ -46,6 +46,8 @@ pub struct Frame {
 pub struct Capture {
     pub track: TrackInfo,
     pub frames: Vec<Frame>,
+    /// The other drivers: the roster for any source, their laps only for live recordings.
+    pub field: crate::field::Field,
 }
 
 /// Telemetry channels read into a `Frame`, in the order `Frame::from_channels` expects.
@@ -138,6 +140,9 @@ pub struct TrackInfo {
     /// Sector start points as lap fractions, starting with 0.0.
     pub sector_pcts: Vec<f64>,
     pub car: String,
+    /// The iRacing session the run was driven in: "Practice", "Open Qualify", "Lone Qualify",
+    /// "Race", "Offline Testing"… Empty when the source doesn't say.
+    pub session_type: String,
     /// RPM where the car's shift light says to change up (`DriverCarSLShiftRPM`).
     pub shift_rpm: Option<f64>,
     /// `DriverCarRedLine`.
@@ -245,7 +250,7 @@ pub struct RunData {
 }
 
 /// Grid used for traces and the map: roughly one point every 3 m.
-fn grid_size(length_m: f64) -> usize {
+pub fn grid_size(length_m: f64) -> usize {
     if length_m > 0.0 {
         ((length_m / 3.0).round() as usize).clamp(400, 4000)
     } else {

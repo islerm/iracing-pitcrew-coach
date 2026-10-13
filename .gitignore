@@ -13,6 +13,10 @@
 # Track maps and turn names generated on this machine (rebuilt on first import)
 /data/tracks/
 
+# Local database (sessions, other drivers' names and laps) and app settings
+/data/pitcrew.db*
+/data/settings.json
+
 # Local tool/editor settings
 .claude/settings.local.json
 .vscode/

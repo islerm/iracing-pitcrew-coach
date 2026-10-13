@@ -1,4 +1,4 @@
-import { OffTrackMark, api, deltaClass, fastest, fmtAgo, fmtClock, fmtDelta, fmtLap, fmtTimeOfDay, html, parseTelemetryName, post, request, stdDev, store, stored, useCallback, useEffect, useRef, useState } from "./js/lib.js";
+import { OffTrackMark, SessionTag, api, deltaClass, fastest, fmtAgo, fmtClock, fmtDelta, fmtLap, fmtTimeOfDay, html, parseTelemetryName, post, request, stdDev, store, stored, useCallback, useEffect, useRef, useState } from "./js/lib.js";
 import { RunView, runTitle } from "./js/run.js";
 
 // ---------- Small components ----------
@@ -317,6 +317,7 @@ function Sidebar({ splits, selectedId, onSelect, onDelete }) {
           >
             <div className="session-title" title=${split.source}>
               ${split.source === "Live" ? html`<span className="tag tag-live">Live</span>` : null}
+              <${SessionTag} type=${split.session_type} />
               <span>${runTitle(split)}</span>
             </div>
             <div className="session-best">${fmtLap(split.fastest_lap_time_s)}</div>

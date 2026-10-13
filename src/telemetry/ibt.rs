@@ -54,6 +54,20 @@ fn yaml_value<'a>(yaml: &'a str, key: &str, from: usize) -> Option<(&'a str, usi
     None
 }
 
+/// The type of the session the file was recorded in (`CurrentSessionNum`'s entry in the
+/// `Sessions:` list), or the first listed when that can't be matched.
+fn session_type(yaml: &str) -> String {
+    let current = yaml_value(yaml, "CurrentSessionNum", 0).map(|(v, _)| v);
+    let mut pos = yaml.find("Sessions:").unwrap_or(0);
+    while let Some((num, next)) = yaml_value(yaml, "SessionNum", pos) {
+        if Some(num) == current {
+            return yaml_value(yaml, "SessionType", next).map(|(v, _)| v.to_string()).unwrap_or_default();
+        }
+        pos = next;
+    }
+    yaml_value(yaml, "SessionType", 0).map(|(v, _)| v.to_string()).unwrap_or_default()
+}
+
 fn parse_track_info(yaml: &str) -> TrackInfo {
     let get = |key: &str| yaml_value(yaml, key, 0).map(|(v, _)| v.to_string()).unwrap_or_default();
 
@@ -102,6 +116,7 @@ fn parse_track_info(yaml: &str) -> TrackInfo {
         length_m,
         sector_pcts,
         car,
+        session_type: session_type(yaml),
         shift_rpm: rpm("DriverCarSLShiftRPM"),
         redline_rpm: rpm("DriverCarRedLine"),
         weather: WeatherSnapshot::from_session_info(get),
@@ -168,6 +183,12 @@ fn open_raw(path: &Path) -> Result<RawIbt> {
     Ok(RawIbt { reader, header, vars, yaml, buf_len })
 }
 
+/// The session info YAML embedded in an .ibt, as iRacing wrote it (Latin-1 mapped to chars).
+#[cfg(test)]
+pub fn read_session_yaml(path: &Path) -> Result<String> {
+    Ok(open_raw(path)?.yaml)
+}
+
 pub fn read_ibt(path: &Path) -> Result<Capture> {
     let RawIbt { mut reader, vars, yaml, buf_len, .. } = open_raw(path)?;
     let find = |name: &str| vars.iter().find(|(n, _, _)| n == name).map(|(_, v, _)| v.clone());
@@ -188,7 +209,8 @@ pub fn read_ibt(path: &Path) -> Result<Capture> {
     if frames.is_empty() {
         bail!("{} contains no telemetry samples", path.display());
     }
-    Ok(Capture { track, frames })
+    let field = crate::field::Field { roster: crate::field::roster::from_session_yaml(&yaml, None), laps: Vec::new() };
+    Ok(Capture { track, frames, field })
 }
 
 /// Channels kept in test fixtures: what the app reads, plus a few likely to be useful soon.
@@ -366,4 +388,30 @@ pub fn write_fixture(input: &Path, out: Option<&Path>, laps: usize) -> Result<St
         times.join(", "),
         kept.len(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_type_is_the_current_sessions() {
+        let yaml = "SessionInfo:
+ CurrentSessionNum: 1
+ Sessions:
+ - SessionNum: 0
+   SessionType: Practice
+ - SessionNum: 1
+   SessionType: Lone Qualify
+ - SessionNum: 2
+   SessionType: Race
+";
+        assert_eq!(session_type(yaml), "Lone Qualify");
+        assert_eq!(session_type("SessionInfo:
+ Sessions:
+ - SessionNum: 0
+   SessionType: Offline Testing
+"), "Offline Testing");
+        assert_eq!(session_type(""), "");
+    }
 }

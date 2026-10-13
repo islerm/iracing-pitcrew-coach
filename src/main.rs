@@ -1,8 +1,10 @@
 mod analysis;
 mod cli;
 mod coach;
+mod field;
 mod server;
 mod stats;
+mod store;
 mod telemetry;
 mod voice;
 

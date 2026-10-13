@@ -27,6 +27,7 @@ use crate::{
         prompt::corner_prompt,
         radio_call::{transcript, LapCall, RadioEntry},
     },
+    field::Field,
     telemetry::{
         ibt::read_ibt,
         track::{self, TrackMap},
@@ -37,21 +38,28 @@ use crate::{
 
 /// A run's data before the summary and feedback are generated.
 pub(super) struct NewRun {
-    source: String,
+    pub(super) source: String,
+    /// iRacing's internal track name and id (empty / `None` when the source doesn't say).
+    pub(super) track_name: String,
+    pub(super) track_id: Option<u32>,
     track_label: String,
     car: String,
-    started_at_ms: u128,
-    laps: Vec<LapMetrics>,
-    traces: Vec<LapTrace>,
+    /// "Practice", "Race", "Offline Testing"… (see `TrackInfo::session_type`).
+    pub(super) session_type: String,
+    pub(super) started_at_ms: u128,
+    pub(super) laps: Vec<LapMetrics>,
+    pub(super) traces: Vec<LapTrace>,
     shift_rpm: Option<f64>,
     redline_rpm: Option<f64>,
     /// Handed to the summary when the run is analysed.
     weather: Option<SessionWeather>,
+    /// The other drivers: the roster, and their laps for live recordings.
+    pub(super) field: Field,
 }
 
 impl NewRun {
     /// Split frames into laps and traces, and find the (saved or newly built) track map.
-    pub(super) fn from_frames(source: String, started_at_ms: u128, track_info: TrackInfo, frames: &[Frame]) -> (Self, Option<TrackMap>) {
+    pub(super) fn from_frames(source: String, started_at_ms: u128, track_info: TrackInfo, frames: &[Frame], field: Field) -> (Self, Option<TrackMap>) {
         let (track_info, saved) = track::with_saved(track_info);
         let run = build_run(frames, &track_info);
         let track = track::resolve(&track_info, saved, run.map_points, run.map_from_gps);
@@ -62,14 +70,18 @@ impl NewRun {
         };
         let new_run = NewRun {
             source,
+            track_name: track_info.track_name,
+            track_id: track_info.track_id,
             track_label,
             car: track_info.car,
+            session_type: track_info.session_type,
             started_at_ms,
             laps: run.laps,
             traces: run.traces,
             shift_rpm: track_info.shift_rpm,
             redline_rpm: track_info.redline_rpm,
             weather: session_weather(frames, &track_info.weather),
+            field,
         };
         (new_run, track)
     }
@@ -79,7 +91,9 @@ pub(super) struct PracticeSplit {
     pub(super) id: String,
     ended_at_ms: u128,
     model: String,
-    run: NewRun,
+    pub(super) run: NewRun,
+    /// The store's id for this run's session, once it's been saved there.
+    pub(super) session_id: Option<i64>,
     /// Behind a lock because renaming turns updates every run on the same track.
     track: Mutex<Option<TrackMap>>,
     summary: SessionSummary,
@@ -94,7 +108,7 @@ pub(super) struct PracticeSplit {
 }
 
 impl PracticeSplit {
-    fn track(&self) -> Option<TrackMap> {
+    pub(super) fn track(&self) -> Option<TrackMap> {
         self.track.lock().expect("track lock poisoned").clone()
     }
 
@@ -116,6 +130,7 @@ impl PracticeSplit {
             source: self.run.source.clone(),
             track_label: self.run.track_label.clone(),
             car: self.run.car.clone(),
+            session_type: self.run.session_type.clone(),
             started_at_ms: self.run.started_at_ms,
             lap_count: self.run.laps.len(),
             complete_lap_count: self.run.laps.iter().filter(|lap| lap.is_complete).count(),
@@ -129,6 +144,7 @@ impl PracticeSplit {
             source: self.run.source.clone(),
             track_label: self.run.track_label.clone(),
             car: self.run.car.clone(),
+            session_type: self.run.session_type.clone(),
             started_at_ms: self.run.started_at_ms,
             ended_at_ms: self.ended_at_ms,
             model: self.model.clone(),
@@ -151,6 +167,7 @@ pub(super) struct SplitOverviewResponse {
     source: String,
     track_label: String,
     car: String,
+    session_type: String,
     started_at_ms: u128,
     lap_count: usize,
     complete_lap_count: usize,
@@ -163,6 +180,7 @@ pub(super) struct SplitDetailResponse {
     source: String,
     track_label: String,
     car: String,
+    session_type: String,
     started_at_ms: u128,
     ended_at_ms: u128,
     model: String,
@@ -329,8 +347,10 @@ pub(super) async fn finalize_split(
         format!("split-{}", guard.next_split_id - 1)
     };
 
+    let store_state = Arc::clone(state);
     let split = blocking("Analysis", move || {
         let mut run = run;
+        let session_id = super::field::save_run_field(&store_state, &run);
         let mut summary = summarize_session(&run.laps);
         add_weather(&mut summary, run.weather.take(), &run.laps);
         if let Some(track) = &track {
@@ -357,7 +377,7 @@ pub(super) async fn finalize_split(
         let peak_g = peak_combined_g(&run.traces);
         let turns = track.as_ref().map(|t| t.turns.as_slice()).unwrap_or_default();
         let radio = transcript(&run.laps, &run.traces, turns, length_m, &live_calls);
-        Arc::new(PracticeSplit { id, ended_at_ms: epoch_ms_now(), model, run, track: Mutex::new(track), summary, feedback, radio, peak_g })
+        Arc::new(PracticeSplit { id, ended_at_ms: epoch_ms_now(), model, run, session_id, track: Mutex::new(track), summary, feedback, radio, peak_g })
     })
     .await?;
 
@@ -397,7 +417,7 @@ pub(super) async fn import_split(
     let (run, track) = blocking("Import", move || -> Result<(NewRun, Option<TrackMap>)> {
         let started_at_ms = std::fs::metadata(&path).ok().and_then(|meta| modified_ms(&meta)).unwrap_or_else(epoch_ms_now);
         let data = read_ibt(&path)?;
-        Ok(NewRun::from_frames(source, started_at_ms, data.track, &data.frames))
+        Ok(NewRun::from_frames(source, started_at_ms, data.track, &data.frames, data.field))
     })
     .await?
     .map_err(|err| error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string()))?;

@@ -132,6 +132,7 @@ ul { margin: 0; padding-left: 18px; }
 .session.active { border-color: var(--accent); background: var(--accent-soft); }
 .session-title { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .session-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-title .tag { flex-shrink: 0; overflow: visible; }
 .session-best { font-family: var(--mono); font-weight: 600; font-size: 13px; text-align: right; }
 .session-meta { font-size: 12px; color: var(--text-3); grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; }
 .session-delete { opacity: 0; border: none; background: none; color: var(--text-3); cursor: pointer; padding: 0 2px; font-size: 14px; }
@@ -712,3 +713,21 @@ table.shift-table tbody tr { cursor: default; }
 .radio-log li.pit, .radio-call.pit { border-color: var(--border-strong); background: var(--surface); }
 .radio-log li.pit .radio-lap span:first-child { font-weight: 600; }
 .radio-log li.pit .radio-lap { cursor: default; }
+.tag-session { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); }
+.tag-session.race { background: rgba(255, 159, 67, 0.14); color: #ffb26b; border-color: transparent; }
+.tag-session.qualify { background: rgba(143, 123, 255, 0.15); color: #b3a6ff; border-color: transparent; }
+.tag-session.test { color: var(--text-3); }
+.page-head h1 .tag { vertical-align: middle; margin-left: 6px; font-size: 11px; }
+
+/* Field tab */
+.field-view { display: flex; flex-direction: column; gap: 16px; }
+.field-note { margin: 0; }
+.field-error { color: var(--bad); }
+.field-scroll { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+table.field-table tbody tr { cursor: default; }
+table.field-table tbody tr.me { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+table.field-table td.why { white-space: normal; font-family: var(--sans); min-width: 200px; }
+.field-against { margin: 0 0 8px; }
+.field-against .mono { margin-left: 2px; }
+.field-notes { margin: 0 0 12px; padding-left: 18px; }
+.field-sort { margin-top: 16px; }

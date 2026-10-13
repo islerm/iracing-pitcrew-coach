@@ -112,7 +112,13 @@ fn spawn_radio(state: Arc<AppState>, calls: Arc<Mutex<Vec<LapCall>>>, cues: Rece
                         CallKind::Pit if !run.laps.iter().any(|l| l.is_complete) => None,
                         CallKind::Pit => pit_debrief(&run, &turns, track.length_m),
                     };
-                    let Some(call) = call else { continue };
+                    let Some(mut call) = call else { continue };
+                    if kind == CallKind::Pit {
+                        // One sentence on the field, from this session's laps only.
+                        if let Some(line) = super::field::pit_field_line(&capture.field, &run, &turns, track.length_m) {
+                            call.text = format!("{} {line}", call.text);
+                        }
+                    }
                     {
                         let Ok(mut list) = calls.lock() else { continue };
                         if list.iter().any(|c| c.lap_number == call.lap_number && c.kind == call.kind) {
@@ -196,7 +202,7 @@ async fn finish(state: &Arc<AppState>, recording: RecordingState) -> ApiResult<S
 
     let started_at_ms = recording.started_at_ms;
     let (run, track) = blocking("Processing", move || {
-        NewRun::from_frames("Live".to_string(), started_at_ms, capture.track, &capture.frames)
+        NewRun::from_frames("Live".to_string(), started_at_ms, capture.track, &capture.frames, capture.field)
     })
     .await?;
 

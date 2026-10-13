@@ -287,3 +287,20 @@ export function trackTempSpan(laps) {
 }
 
 export const rangeTitle = (what, r) => `${what}: ${r.start.toFixed(1)}°C at the start, ${r.end.toFixed(1)}°C at the end (${r.min.toFixed(1)}–${r.max.toFixed(1)}°C)`;
+
+/** Short label and style for an iRacing session type ("Lone Qualify" → Qualify), or null. */
+export function sessionTag(type) {
+  if (!type) return null;
+  const t = type.toLowerCase();
+  if (t.includes("race")) return { label: "Race", kind: "race" };
+  if (t.includes("qualify")) return { label: "Qualify", kind: "qualify" };
+  if (t.includes("testing")) return { label: "Test", kind: "test" };
+  if (t.includes("time trial")) return { label: "Time trial", kind: "qualify" };
+  return { label: type, kind: "practice" };
+}
+
+/** Small chip naming the session a run was driven in. */
+export function SessionTag({ type }) {
+  const tag = sessionTag(type);
+  return tag ? html`<span className=${"tag tag-session " + tag.kind} title=${`iRacing session: ${type}`}>${tag.label}</span>` : null;
+}

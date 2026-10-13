@@ -1,8 +1,9 @@
-import { Kpi, OffTrackMark, SKY_ICON, Segmented, WETNESS, api, computeStats, deltaClass, fastest, fmtDelta, fmtLap, fmtNum, fmtTempRange, fmtTimeOfDay, html, isNum, lapWeatherTitle, offTrackTitle, offTracks, post, range, rangeTitle, sameConditions, sectorOf, trackTempSpan, useCallback, useContext, useEffect, useMemo, useRef, useState, useStored } from "./lib.js";
+import { Kpi, OffTrackMark, SKY_ICON, Segmented, WETNESS, api, computeStats, deltaClass, fastest, fmtDelta, fmtLap, fmtNum, fmtTempRange, fmtTimeOfDay, html, isNum, lapWeatherTitle, offTrackTitle, offTracks, post, range, rangeTitle, SessionTag, sameConditions, sectorOf, trackTempSpan, useCallback, useContext, useEffect, useMemo, useRef, useState, useStored } from "./lib.js";
 import { MapRef, MiniMap, TrackMapView, TurnContext, TurnScope, TurnText, gearColor, ghostPct, idxOf, mapIndex, turnIndex } from "./trackmap.js";
 import { GripCircle, PaceChart, TraceChart } from "./charts.js";
 import { CornerCoach, CornerTable, ShiftsCard } from "./corners.js";
 import { RadioToggle, SpeakButton } from "./voice.js";
+import { FieldView } from "./field.js";
 import { officialTurns, rotatedMap } from "./officialmap.js";
 
 export function runTitle(split) {
@@ -1031,7 +1032,7 @@ export function RunView({ split, laps, model }) {
   return html`<${TurnScope} base=${turnBase}>
     <div className="page-head">
       <div>
-        <h1>${runTitle(split)}</h1>
+        <h1>${runTitle(split)} <${SessionTag} type=${split.session_type} /></h1>
         <p>${subtitle}</p>
         <${WeatherStrip} weather=${split.weather} />
       </div>
@@ -1042,12 +1043,15 @@ export function RunView({ split, laps, model }) {
         options=${[
           { value: "analysis", label: "Analysis" },
           { value: "radio", label: `Radio${radio.length ? ` · ${radio.length}` : ""}` },
+          { value: "field", label: "Field" },
         ]}
       />
     </div>
 
     ${tab === "radio"
       ? html`<${RadioTranscript} entries=${radio} laps=${laps} onOpenLap=${openLap} />`
+      : tab === "field"
+      ? html`<${FieldView} split=${split} />`
       : html`<${React.Fragment}>
     <${LapBar}
       laps=${laps}

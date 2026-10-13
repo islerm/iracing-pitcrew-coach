@@ -7,7 +7,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::telemetry::trace::{lap_metrics, Capture, Frame, LapMetrics, TrackInfo};
+use crate::field::capture::{CarSample, FieldRecorder};
+use crate::field::{Field, Roster};
+use crate::telemetry::trace::{grid_size, lap_metrics, Capture, Frame, LapMetrics, TrackInfo};
 
 /// What the radio hears about from the recorder, each with a snapshot of the capture so far.
 pub enum RadioCue {
@@ -32,15 +34,34 @@ struct Recorder {
     radio: Option<Sender<RadioCue>>,
     /// Session time the car last left pit road (`None` before it has).
     left_pits_at: Option<f64>,
+    /// Who else is in the session, and their laps when recording live.
+    roster: Roster,
+    field: FieldRecorder,
 }
 
 impl Recorder {
-    fn new(track: TrackInfo, sink: Arc<Mutex<Vec<LapMetrics>>>, radio: Option<Sender<RadioCue>>) -> Self {
-        Self { track, frames: Vec::new(), sink, republish_at: None, radio, left_pits_at: None }
+    fn new(track: TrackInfo, sink: Arc<Mutex<Vec<LapMetrics>>>, radio: Option<Sender<RadioCue>>, roster: Roster) -> Self {
+        let field = FieldRecorder::new(grid_size(track.length_m));
+        Self { track, frames: Vec::new(), sink, republish_at: None, radio, left_pits_at: None, roster, field }
     }
 
     fn snapshot(&self) -> Capture {
-        Capture { track: self.track.clone(), frames: self.frames.clone() }
+        let field = Field { roster: self.roster.clone(), laps: self.field.laps().to_vec() };
+        Capture { track: self.track.clone(), frames: self.frames.clone(), field }
+    }
+
+    /// One tick of the other cars (see `FieldRecorder::push`).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn push_field(&mut self, time: f64, wetness: Option<u8>, cars: Vec<CarSample>) {
+        self.field.push(time, wetness, cars);
+    }
+
+    /// A fresher roster from the session info; an empty one (a failed read) is ignored.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn set_roster(&mut self, roster: Roster) {
+        if !roster.drivers.is_empty() {
+            self.roster = roster;
+        }
     }
 
     fn push(&mut self, frame: Frame) {
@@ -85,7 +106,8 @@ impl Recorder {
     }
 
     fn finish(self) -> Capture {
-        Capture { track: self.track, frames: self.frames }
+        let field = Field { roster: self.roster, laps: self.field.into_laps() };
+        Capture { track: self.track, frames: self.frames, field }
     }
 }
 
@@ -160,7 +182,7 @@ pub fn run_live_telemetry_until_stopped(
     let mut conn = Connection::new().map_err(|e| anyhow::anyhow!("Unable to open telemetry. Is iRacing running? {e}"))?;
 
     // Track details are nice to have (map + sectors) but not required to time laps.
-    let track = match conn.session_info() {
+    let (track, roster) = match conn.session_info() {
         Ok(session) => {
             let car = session
                 .drivers
@@ -169,7 +191,16 @@ pub fn run_live_telemetry_until_stopped(
                 .find(|driver| driver.index == session.drivers.car_index)
                 .map(|driver| driver.car_screen_name.clone())
                 .unwrap_or_default();
-            crate::telemetry::track::with_saved(TrackInfo {
+            // The session running now, from the `SessionNum` channel (the info lists them all).
+            let session_num = conn.telemetry().ok().and_then(|sample| num(&sample, "SessionNum"));
+            let sessions = &session.session.sessions;
+            let session_type = session_num
+                .and_then(|n| sessions.iter().find(|s| s.session_number as f64 == n))
+                .or(sessions.first())
+                .map(|s| s.session_type.clone())
+                .unwrap_or_default();
+            let roster = crate::field::roster::from_session_details(&session, session_num.map(|n| n as i32));
+            let track = crate::telemetry::track::with_saved(TrackInfo {
                 track_name: session.weekend.track_name.clone(),
                 track_id: Some(session.weekend.track_id).filter(|id| *id > 0),
                 display_name: session.weekend.track_display_name.clone(),
@@ -184,6 +215,7 @@ pub fn run_live_telemetry_until_stopped(
                     .unwrap_or(0.0),
                 sector_pcts: Vec::new(),
                 car,
+                session_type,
                 shift_rpm: Some(session.drivers.shift_light_shift_rpm as f64).filter(|v| *v > 0.0),
                 redline_rpm: Some(session.drivers.red_line_rpm as f64).filter(|v| *v > 0.0),
                 // The rest of the weather comes from the telemetry channels on every sample.
@@ -194,25 +226,42 @@ pub fn run_live_telemetry_until_stopped(
                     ..Default::default()
                 },
             })
-            .0
+            .0;
+            (track, roster)
         }
         Err(err) => {
             eprintln!("Could not read iRacing session info ({err}); recording without track details.");
-            TrackInfo::default()
+            (TrackInfo::default(), Roster::default())
         }
     };
 
     let blocking = conn.blocking().map_err(|e| anyhow::anyhow!("Could not create telemetry handle: {e}"))?;
-    let mut recorder = Recorder::new(track, live_sink, radio);
+    let mut recorder = Recorder::new(track, live_sink, radio, roster);
 
     let channels: Vec<&'static str> = crate::telemetry::trace::channel_names().collect();
     let mut last_on_track = Instant::now();
+    let mut roster_read = Instant::now();
     while !stop_signal.load(Ordering::Relaxed) {
         if auto_end && last_on_track.elapsed() >= AUTO_END_AFTER {
             break;
         }
         // Timeouts while iRacing is paused or loading are expected: just poll again.
         let Ok(telem) = blocking.sample(Duration::from_millis(500)) else { continue };
+
+        // Drivers join and results change during a session.
+        if roster_read.elapsed() >= ROSTER_REFRESH {
+            roster_read = Instant::now();
+            if let Ok(session) = conn.session_info() {
+                let session_num = num(&telem, "SessionNum").map(|n| n as i32);
+                recorder.set_roster(crate::field::roster::from_session_details(&session, session_num));
+            }
+        }
+        // The rest of the player's class, whether or not the player is on track right now.
+        if let Some(time) = num(&telem, "SessionTime") {
+            let wetness = num(&telem, "TrackWetness").filter(|w| *w >= 1.0).map(|w| w as u8);
+            let cars = field_samples(&telem, &recorder.roster);
+            recorder.push_field(time, wetness, cars);
+        }
 
         // Not in the car on track (garage, spectating, replay): nothing useful to record.
         if num(&telem, "IsOnTrack") == Some(0.0) {
@@ -224,6 +273,48 @@ pub fn run_live_telemetry_until_stopped(
     }
 
     Ok(recorder.finish())
+}
+
+/// How often the session info (drivers, results) is read again during a recording.
+#[cfg(windows)]
+const ROSTER_REFRESH: Duration = Duration::from_secs(30);
+
+/// This tick's per-car channels for the other cars in the player's class.
+#[cfg(windows)]
+fn field_samples(sample: &iracing::telemetry::Sample, roster: &Roster) -> Vec<CarSample> {
+    use iracing::telemetry::Value;
+    let floats = |name: &'static str| match sample.get(name) {
+        Ok(Value::FloatVec(v)) => v,
+        _ => Vec::new(),
+    };
+    let ints = |name: &'static str| match sample.get(name) {
+        Ok(Value::IntVec(v)) => v,
+        _ => Vec::new(),
+    };
+    let bools = |name: &'static str| match sample.get(name) {
+        Ok(Value::BoolVec(v)) => v,
+        _ => Vec::new(),
+    };
+    let pct = floats("CarIdxLapDistPct");
+    let gear = ints("CarIdxGear");
+    let pit = bools("CarIdxOnPitRoad");
+    let surface = ints("CarIdxTrackSurface");
+    let last = floats("CarIdxLastLapTime");
+    (0..pct.len())
+        .map(|i| i as i32)
+        .filter(|&car| car != roster.player_car_idx && roster.in_player_class(car))
+        .map(|car| {
+            let i = car as usize;
+            CarSample {
+                car_idx: car,
+                pct: pct[i],
+                gear: gear.get(i).copied().unwrap_or(0) as i8,
+                on_pit_road: pit.get(i).copied().unwrap_or(false),
+                surface: surface.get(i).copied().unwrap_or(-1) as i8,
+                last_lap_time: last.get(i).copied().unwrap_or(-1.0),
+            }
+        })
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -248,7 +339,7 @@ pub fn replay_until_stopped(
 ) -> Result<Capture> {
     let data = crate::telemetry::ibt::read_ibt(path)?;
     let track = crate::telemetry::track::with_saved(data.track).0;
-    let mut recorder = Recorder::new(track, live_sink, radio);
+    let mut recorder = Recorder::new(track, live_sink, radio, data.field.roster);
     let speed = if speed > 0.0 { speed } else { 1.0 };
 
     let started = Instant::now();
@@ -278,7 +369,7 @@ mod tests {
     #[test]
     fn pit_entry_is_cued_once_per_visit() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut recorder = Recorder::new(TrackInfo::default(), Arc::new(Mutex::new(Vec::new())), Some(tx));
+        let mut recorder = Recorder::new(TrackInfo::default(), Arc::new(Mutex::new(Vec::new())), Some(tx), Roster::default());
         let frame = |time: f64, pit: bool| {
             let mut f = Frame::from_channels(|_| None);
             (f.time, f.lap, f.pct, f.on_pit_road) = (time, 1, 0.5, pit);

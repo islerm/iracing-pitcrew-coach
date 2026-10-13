@@ -1,5 +1,6 @@
 //! The local web server: the API behind the coaching UI, and the static UI files.
 
+mod field;
 mod files;
 mod recording;
 mod settings;
@@ -22,6 +23,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::store::{self, Store};
 use crate::coach::{installed_models, InstalledModel, ModelError};
 use crate::voice::{Tts, VoiceEngine};
 
@@ -41,8 +43,16 @@ pub fn run_ui_server(
         let voice = Arc::new(VoiceEngine::new(tts, voice.as_deref()));
         let warming = voice.clone();
         tokio::task::spawn_blocking(move || warming.warm_up());
+        let store = match Store::open(std::path::Path::new(store::DEFAULT_PATH)) {
+            Ok(store) => Some(Mutex::new(store)),
+            Err(err) => {
+                eprintln!("Could not open the session store ({}): {err:#}. Continuing without it.", store::DEFAULT_PATH);
+                None
+            }
+        };
         let state = Arc::new(AppState {
             voice,
+            store,
             live_radio: AtomicBool::new(true),
             radio_volume: AtomicU32::new(settings::Settings::load().radio_volume.to_bits()),
             auto_record,
@@ -79,6 +89,7 @@ pub fn run_ui_server(
             .route("/splits/:id/laps", get(splits::list_split_laps))
             .route("/splits/:id/laps/:lap_number/trace", get(splits::get_lap_trace))
             .route("/splits/:id/corners/:turn", post(splits::analyze_corner))
+            .route("/splits/:id/field", get(field::get_field))
             .route("/splits/:id/shifts", get(splits::get_shifts))
             .route("/splits/:id/feedback", post(splits::get_feedback))
             .route("/voice", get(voice::get_voice))
@@ -123,6 +134,8 @@ struct AppState {
     live_radio: AtomicBool,
     /// Loudness multiplier for the radio calls, as f32 bits.
     radio_volume: AtomicU32,
+    /// Sessions, drivers and their laps, kept across runs. Only touched off the async runtime.
+    store: Option<Mutex<Store>>,
     inner: Mutex<Inner>,
 }
 
